@@ -5,7 +5,11 @@ from datetime import datetime
 import subprocess
 import asyncio
 import pytz
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
+HOST_REMOTE_URL = os.getenv("HOST_REMOTE_URL")
 
 router = APIRouter(prefix="/fingerprint", tags=["Fingerprint Attendance"])
 
@@ -21,9 +25,11 @@ def configure_network():
         )
     subprocess.run(["sudo", "ip", "link", "set", "enx00e04c361694", "up"], check=True)
 
-
 @router.post("/attendance")
-async def record_attendance():
+async def record_live_attendance(duration: int = 30):
+    """
+    Live attendance capture for multiple students within a time window (default 30 seconds).
+    """
     configure_network()
     conn = connect_device()
     if not conn:
@@ -33,40 +39,47 @@ async def record_attendance():
         print("🔒 Disabling device...")
         conn.disable_device()
 
-        print("📥 Fetching attendance logs...")
+        print("📥 Fetching initial attendance logs...")
         initial_logs = conn.get_attendance() or []
-        initial_count = len(initial_logs)
-        print(f"🗂️ Initial logs: {initial_count}")
+        initial_log_ids = set((log.user_id, log.timestamp) for log in initial_logs)
+        print(f"🗂️ Initial logs: {len(initial_logs)}")
 
-        # Wait for new log up to 30 seconds
-        for attempt in range(30):
+        detected_students = []
+
+        for _ in range(duration):
             new_logs = conn.get_attendance() or []
-            print(f"⏱️ Attempt {attempt+1}: {len(new_logs)} logs")
+            for log in new_logs:
+                log_key = (log.user_id, log.timestamp)
+                if log_key not in initial_log_ids:
+                    initial_log_ids.add(log_key)
+                    uid = log.user_id
+                    egypt_tz = pytz.timezone("Africa/Cairo")
+                    timestamp = datetime.now(egypt_tz).isoformat()
 
-            if len(new_logs) > initial_count:
-                last_log = new_logs[-1]
-                uid = last_log.user_id
-                egypt_tz = pytz.timezone("Africa/Cairo")
-                timestamp = datetime.now(egypt_tz).isoformat()
+                    print(f"✅ UID {uid} identified at {timestamp}")
+                    print("🌐 Sending data to main backend...")
 
-                print(f"✅ UID {uid} identified at {timestamp}")
-                print("🌐 Sending data to main backend...")
+                    async with httpx.AsyncClient() as client:
+                        response = await client.post(
+                            f"{HOST_REMOTE_URL}/attendance/",
+                            json={"uid": uid, "timestamp": timestamp}
+                        )
 
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(
-                        "http://localhost:8000/attendance/",
-                        json={"uid": uid, "timestamp": timestamp}
-                    )
-
-                print(f"📨 Main backend response: {response.status_code} {response.text}")
-                if response.status_code != 200:
-                    raise HTTPException(status_code=500, detail=f"Main backend error: {response.text}")
-
-                return {"message": "✅ Attendance sent", "uid": uid}
+                    print(f"📨 Main backend response: {response.status_code} {response.text}")
+                    if response.status_code == 200:
+                        detected_students.append({"uid": uid, "timestamp": timestamp})
+                    else:
+                        detected_students.append({"uid": uid, "timestamp": timestamp, "error": response.text})
 
             await asyncio.sleep(1)
 
-        raise HTTPException(status_code=408, detail="⏰ Timeout: No fingerprint detected")
+        if not detected_students:
+            raise HTTPException(status_code=408, detail="⏰ Timeout: No fingerprints detected")
+
+        return {
+            "message": f"✅ Attendance captured for {len(detected_students)} student(s)",
+            "students": detected_students
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"❌ Attendance error: {e}")

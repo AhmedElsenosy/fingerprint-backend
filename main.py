@@ -4,6 +4,7 @@ from beanie import init_beanie
 from app.models.counter import Counter
 # from app.models.counter import Counter
 from app.routes import fingerprint, fingerprint_attendance  
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
@@ -22,3 +23,11 @@ async def connect_to_db():
 # Include your routes
 app.include_router(fingerprint.router)
 app.include_router(fingerprint_attendance.router)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
