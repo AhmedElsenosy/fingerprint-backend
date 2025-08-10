@@ -137,6 +137,68 @@ class ScannerConnection:
                 'connected': self.is_connected
             }
     
+    def scan_document(self, output_path: str, resolution: int = 300, mode: str = 'Color') -> bool:
+        """
+        Scan a document and save to file.
+        
+        Args:
+            output_path: Path to save the scanned image
+            resolution: Scan resolution in DPI
+            mode: Scan mode ('Color', 'Gray', 'Lineart')
+            
+        Returns:
+            True if scan successful, False otherwise
+        """
+        if not self.is_connected or not self.scanner:
+            print("❌ No scanner connected")
+            return False
+        
+        try:
+            # Set scan parameters
+            print(f"🔧 Setting scan parameters: {resolution} DPI, {mode} mode")
+            
+            # Set resolution if supported
+            if hasattr(self.scanner, 'resolution'):
+                self.scanner.resolution = resolution
+                print(f"✅ Resolution set to {resolution} DPI")
+            
+            # Set scan mode if supported
+            if hasattr(self.scanner, 'mode'):
+                self.scanner.mode = mode
+                print(f"✅ Scan mode set to {mode}")
+            
+            print("📷 Starting scan...")
+            
+            # Start the scan
+            self.scanner.start()
+            
+            # Get the scanned image
+            image = self.scanner.snap()
+            
+            # Save the image
+            if hasattr(image, 'save'):
+                # PIL Image object
+                image.save(output_path)
+            else:
+                # NumPy array - convert to PIL Image
+                from PIL import Image as PILImage
+                import numpy as np
+                
+                if isinstance(image, np.ndarray):
+                    pil_image = PILImage.fromarray(image)
+                    pil_image.save(output_path)
+                else:
+                    # Try to save directly
+                    with open(output_path, 'wb') as f:
+                        f.write(image)
+            
+            print(f"✅ Document scanned and saved to: {output_path}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error during scanning: {e}")
+            return False
+    
     def disconnect(self):
         """Disconnect from the scanner and cleanup."""
         try:

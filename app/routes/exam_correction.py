@@ -5,11 +5,13 @@ import os
 import shutil
 from pathlib import Path
 from typing import Dict
+import time
 
 from app.utils.exam_corrector import correct_student_exam
 from app.utils.model_detector import detect_exam_model
 from app.utils.student_id_detector import detect_student_id
 from app.utils.bubble_sheet_processor import process_bubble_sheet
+from scanner import ScannerConnection
 from bson import ObjectId
 
 router = APIRouter(prefix="/exams", tags=["Exam Correction"])
@@ -165,6 +167,533 @@ async def debug_student_id_detection_alt(image: UploadFile = File(...)):
             "error": f"Student ID detection debug failed: {str(e)}"
         }
 
+@router.post("/{exam_id}/submit-with-scanner")
+async def submit_exam_solution_with_scanner(
+    exam_id: str,
+    manual_student_id: str = Form(None),  # Optional manual student ID fallback
+    force_manual_id: str = Form(None),    # Accept as string and convert
+    scan_resolution: int = Form(300),     # Scanner resolution in DPI
+    scan_mode: str = Form("Color")        # Scanner mode
+):
+    """
+    Submit and automatically correct a student's exam solution using scanner.
+    This endpoint connects to scanner, scans the student's bubble sheet,
+    and processes it for automatic correction.
+    """
+    scanner = None
+    temp_solution_path = None
+    
+    try:
+        # Step 1: Get exam details from main backend
+        async with httpx.AsyncClient() as client:
+            exam_response = await client.get(
+                f"{MAIN_BACKEND_URL}/internal/exams/{exam_id}",
+                timeout=30.0
+            )
+            
+            if exam_response.status_code != 200:
+                raise HTTPException(
+                    status_code=exam_response.status_code,
+                    detail=f"Failed to get exam details: {exam_response.text}"
+                )
+            
+            exam_data = exam_response.json()
+        
+        # Step 2: Connect to Scanner
+        print("📡 Connecting to scanner...")
+        scanner = ScannerConnection()
+        
+        if not scanner.connect_scanner():
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to connect to scanner. Please ensure scanner is connected and powered on."
+            )
+        
+        scanner_info = scanner.get_scanner_info()
+        print(f"✅ Scanner connected: {scanner_info.get('name', 'Unknown')}")
+        
+        # Step 3: Scan student's bubble sheet
+        timestamp = int(time.time())
+        temp_filename = f"scanned_{exam_id}_{timestamp}.png"
+        temp_solution_path = os.path.join(STUDENT_SOLUTION_DIR, temp_filename)
+        
+        print(f"📄 Scanning document...")
+        
+        # Scan the document immediately
+        success = scanner.scan_document(
+            output_path=temp_solution_path,
+            resolution=scan_resolution,
+            mode=scan_mode
+        )
+        
+        if not success:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to scan document. Please check scanner and paper placement."
+            )
+        
+        print(f"✅ Document scanned successfully: {temp_solution_path}")
+        
+        # Step 4: Detect student ID from scanned bubble sheet
+        detected_student_id = None
+        id_confidence = 0.0
+        id_detection = {}
+        
+        # Convert force_manual_id to boolean
+        force_manual_bool = force_manual_id and str(force_manual_id).lower() in ['true', '1', 'yes', 'on']
+        
+        if force_manual_bool and manual_student_id:
+            # Force manual ID - skip auto-detection entirely
+            detected_student_id = manual_student_id.strip()
+            id_confidence = 1.0
+            id_detection = {
+                "student_id": detected_student_id,
+                "confidence": 1.0,
+                "message": "Manual student ID used (auto-detection skipped)",
+                "debug_info": {"method": "manual_override", "auto_detection_skipped": True}
+            }
+            print(f"🆔 Using forced manual student ID: {detected_student_id}")
+        else:
+            # Normal auto-detection using bubble_sheet_processor
+            print(f"🔍 Using bubble_sheet_processor for student ID detection...")
+            try:
+                # Load scanned image for bubble sheet processing
+                import cv2
+                image = cv2.imread(temp_solution_path)
+                if image is None:
+                    raise ValueError("Could not load scanned image for processing")
+                
+                # Process bubble sheet to detect student ID
+                bubble_result = process_bubble_sheet(
+                    image, 
+                    reference_data_file='BubbleSheetCorrecterModule/reference_data.json',
+                    id_reference_file='BubbleSheetCorrecterModule/id_coordinates.json'
+                )
+                
+                if bubble_result['success'] and bubble_result['results']:
+                    grade_data = bubble_result['results']['grade_data']
+                    
+                    # Extract student ID from bubble sheet processor results
+                    if 'id' in grade_data:
+                        id_data = grade_data['id']
+                        detected_student_id = id_data['value']
+                        id_confidence = 1.0 if id_data['is_complete'] else 0.5
+                        id_detection = {
+                            "student_id": detected_student_id,
+                            "confidence": id_confidence,
+                            "message": "Detected using bubble_sheet_processor",
+                            "debug_info": {
+                                "method": "bubble_sheet_processor", 
+                                "is_complete": id_data['is_complete'],
+                                "raw_value": id_data['value']
+                            }
+                        }
+                        print(f"🆔 Bubble processor detected ID: {detected_student_id} (complete: {id_data['is_complete']})")
+                    else:
+                        detected_student_id = None
+                        id_confidence = 0.0
+                        id_detection = {
+                            "student_id": None,
+                            "confidence": 0.0,
+                            "message": "No ID section found in bubble sheet results",
+                            "debug_info": {"method": "bubble_sheet_processor", "no_id_section": True}
+                        }
+                        print(f"❌ Bubble processor found no ID section")
+                else:
+                    detected_student_id = None
+                    id_confidence = 0.0
+                    id_detection = {
+                        "student_id": None,
+                        "confidence": 0.0,
+                        "message": f"Bubble sheet processing failed: {bubble_result.get('message', 'Unknown error')}",
+                        "debug_info": {"method": "bubble_sheet_processor", "processing_failed": True}
+                    }
+                    print(f"❌ Bubble sheet processing failed: {bubble_result.get('message')}")
+                    
+            except Exception as e:
+                print(f"❌ Error in bubble_sheet_processor: {str(e)}")
+                detected_student_id = None
+                id_confidence = 0.0
+                id_detection = {
+                    "student_id": None,
+                    "confidence": 0.0,
+                    "message": f"Bubble processor error: {str(e)}",
+                    "debug_info": {"method": "bubble_sheet_processor", "error": str(e)}
+                }
+            
+            # Use manual student ID if auto-detection fails and manual ID is provided
+            if not detected_student_id and manual_student_id:
+                detected_student_id = manual_student_id.strip()
+                id_confidence = 1.0  # High confidence for manual input
+                id_detection["message"] = f"Auto-detection failed, using manual student ID. Original: {id_detection.get('message', 'N/A')}"
+                print(f"🆔 Auto-detection failed, using manual student ID: {detected_student_id}")
+        
+        if not detected_student_id:
+            error_detail = f"Could not detect student ID from scanned bubble sheet. {id_detection.get('message', 'Unknown error')}"
+            if id_detection.get('debug_info'):
+                debug_info = id_detection['debug_info']
+                error_detail += f" Debug: Found {debug_info.get('circles_found', 0)} circles, {debug_info.get('columns_found', 0)} columns."
+                
+            error_detail += " You can retry with manual_student_id parameter."
+            
+            raise HTTPException(
+                status_code=400,
+                detail=error_detail
+            )
+        
+        # Validate student ID format
+        if not detected_student_id or len(detected_student_id.strip()) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid student ID detected: empty or null value"
+            )
+        
+        # Clean and validate student ID
+        detected_student_id = detected_student_id.strip()
+        
+        # Ensure student ID has reasonable length
+        if len(detected_student_id) == 0 or len(detected_student_id) > 20:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid student ID format: '{detected_student_id}' (length: {len(detected_student_id)}). Must be 1-20 characters."
+            )
+        
+        # Check for obviously invalid IDs
+        if (detected_student_id == "0" or 
+            (len(detected_student_id) == 1 and detected_student_id.isdigit()) or
+            (len(detected_student_id) == 2 and detected_student_id in ["00", "11", "22", "33", "44", "55", "66", "77", "88", "99"]) or
+            len(detected_student_id) < 3):
+            
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid student ID detected: '{detected_student_id}' appears to be incorrect. Please use manual_student_id parameter or check bubble sheet image quality."
+            )
+        
+        print(f"🆔 Detected Student ID: {detected_student_id} (confidence: {id_confidence:.2f})")
+        
+        # Step 5: Student lookup (same as original function)
+        print(f"🔍 Looking up student with student_id: {detected_student_id}")
+        try:
+            student_numeric_id = int(detected_student_id)
+            
+            async with httpx.AsyncClient() as client:
+                student_lookup_response = await client.get(
+                    f"{MAIN_BACKEND_URL}/internal/students/by-student-id/{student_numeric_id}",
+                    timeout=30.0
+                )
+                
+                if student_lookup_response.status_code == 200:
+                    student_info = student_lookup_response.json()
+                    student_object_id = student_info.get("_id")
+                    print(f"✅ Found student: {student_info.get('first_name')} {student_info.get('last_name')} (ObjectId: {student_object_id})")
+                    backend_student_id = student_object_id
+                elif student_lookup_response.status_code == 404:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Student with ID {detected_student_id} not found in database. Please verify the student ID is correct and the student is registered."
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to lookup student: {student_lookup_response.text}"
+                    )
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid student ID format: '{detected_student_id}' must be a numeric value"
+            )
+        except httpx.RequestError as e:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Failed to communicate with main backend for student lookup: {str(e)}"
+            )
+        
+        # Step 6: Rename scanned file with detected student ID
+        final_filename = f"scanned_{detected_student_id}_{exam_id}_{timestamp}.png"
+        student_solution_path = os.path.join(STUDENT_SOLUTION_DIR, final_filename)
+        
+        # Move temp file to final location
+        os.rename(temp_solution_path, student_solution_path)
+        temp_solution_path = student_solution_path  # Update temp path for cleanup
+        
+        # Step 7: Detect exam model from scanned bubble sheet using bubble_sheet_processor
+        print(f"🔍 Using bubble_sheet_processor for exam model detection...")
+        detected_model = None
+        model_confidence = 0.0
+        model_detection = {}
+        
+        try:
+            # Load scanned image for bubble sheet processing
+            import cv2
+            image = cv2.imread(student_solution_path)
+            if image is None:
+                raise ValueError("Could not load scanned image for model detection")
+            
+            # Process bubble sheet to detect exam model
+            bubble_result = process_bubble_sheet(
+                image, 
+                reference_data_file='BubbleSheetCorrecterModule/reference_data.json',
+                id_reference_file='BubbleSheetCorrecterModule/id_coordinates.json',
+                exam_models_file='BubbleSheetCorrecterModule/exam_models.json',
+                exam_model_key='exam_model_aruco'  # Use ArUco-based model detection
+            )
+            
+            if bubble_result['success'] and bubble_result['results']:
+                grade_data = bubble_result['results']['grade_data']
+                
+                # Extract exam model from bubble sheet processor results
+                if 'exam_model' in grade_data:
+                    model_data = grade_data['exam_model']
+                    detected_model = model_data['value']
+                    model_confidence = 1.0 if model_data['is_valid'] else 0.5
+                    model_detection = {
+                        "model_number": detected_model,
+                        "confidence": model_confidence,
+                        "message": "Detected using bubble_sheet_processor",
+                        "debug_info": {
+                            "method": "bubble_sheet_processor", 
+                            "is_valid": model_data['is_valid'],
+                            "raw_value": model_data['value'],
+                            "fill_percentages": model_data.get('fill_percentages', {})
+                        }
+                    }
+                    print(f"📝 Bubble processor detected model: {detected_model} (valid: {model_data['is_valid']})")
+                else:
+                    detected_model = None
+                    model_confidence = 0.0
+                    model_detection = {
+                        "model_number": None,
+                        "confidence": 0.0,
+                        "message": "No exam model section found in bubble sheet results",
+                        "debug_info": {"method": "bubble_sheet_processor", "no_model_section": True}
+                    }
+                    print(f"❌ Bubble processor found no exam model section")
+            else:
+                detected_model = None
+                model_confidence = 0.0
+                model_detection = {
+                    "model_number": None,
+                    "confidence": 0.0,
+                    "message": f"Bubble sheet processing failed for model detection: {bubble_result.get('message', 'Unknown error')}",
+                    "debug_info": {"method": "bubble_sheet_processor", "processing_failed": True}
+                }
+                print(f"❌ Bubble sheet processing failed for model detection: {bubble_result.get('message')}")
+                
+        except Exception as e:
+            print(f"❌ Error in bubble_sheet_processor for model detection: {str(e)}")
+            detected_model = None
+            model_confidence = 0.0
+            model_detection = {
+                "model_number": None,
+                "confidence": 0.0,
+                "message": f"Bubble processor error for model detection: {str(e)}",
+                "debug_info": {"method": "bubble_sheet_processor", "error": str(e)}
+            }
+        
+        # Step 8: Get exam models and find the correct solution (same logic as upload endpoint)
+        exam_models = exam_data.get("models", [])
+        legacy_solution = exam_data.get("solution_photo")
+        selected_model = None
+        exam_solution_path = None  # Initialize exam_solution_path
+        
+        # Debug: Print available solutions and detected model
+        print(f"🔍 Available exam models: {len(exam_models)}")
+        for i, model in enumerate(exam_models):
+            print(f"  Model {i+1}: {model.get('model_number')} - {model.get('model_name')} (solution: {bool(model.get('solution_photo'))})")
+        print(f"🔍 Legacy solution available: {bool(legacy_solution)}")
+        print(f"🔍 Detected model from scanner: '{detected_model}' (confidence: {model_confidence:.2f})")
+        
+        # If model detection failed or returned None/empty, use fallback logic
+        if not detected_model or detected_model == "None" or str(detected_model).strip() == "":
+            print(f"⚠️ Model detection failed or returned invalid result. Using fallback strategy.")
+            
+            if legacy_solution:
+                # Use legacy solution as primary fallback
+                exam_solution_path = legacy_solution
+                selected_model = {"model_name": "Legacy Model (Scanner Fallback)", "model_number": "legacy"}
+                detected_model = "legacy"
+                print(f"✅ Using legacy solution as fallback for scanner correction")
+            elif exam_models and any(model.get("solution_photo") for model in exam_models):
+                # Use first available model as secondary fallback
+                for model in exam_models:
+                    if model.get("solution_photo"):
+                        selected_model = model
+                        detected_model = model.get("model_number", 1)
+                        exam_solution_path = selected_model.get("solution_photo")
+                        print(f"✅ Using first available model as fallback for scanner correction: Model {detected_model}")
+                        break
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Model detection failed and no fallback solutions available. Please upload an answer key to the exam first."
+                )
+        else:
+            # Model was detected, try to find matching solution
+            print(f"📝 Model detected successfully: {detected_model}")
+            
+            # Strategy 1: Exact match
+            for model in exam_models:
+                if str(model.get("model_number")).upper() == str(detected_model).upper():
+                    selected_model = model
+                    print(f"✅ Found exact model match: {model.get('model_number')}")
+                    break
+            
+            # Strategy 2: Try converting letters to numbers (A=1, B=2, C=3, etc.)
+            if not selected_model and str(detected_model).isalpha() and len(str(detected_model)) == 1:
+                model_number_from_letter = ord(str(detected_model).upper()) - ord('A') + 1
+                print(f"🔄 Trying to match letter '{detected_model}' as number {model_number_from_letter}")
+                for model in exam_models:
+                    if model.get("model_number") == model_number_from_letter or str(model.get("model_number")) == str(model_number_from_letter):
+                        selected_model = model
+                        print(f"✅ Found model by letter-to-number conversion: {model.get('model_number')}")
+                        break
+            
+            # Strategy 3: Try converting numbers to letters (1=A, 2=B, 3=C, etc.)
+            if not selected_model and str(detected_model).isdigit():
+                try:
+                    model_letter_from_number = chr(int(detected_model) - 1 + ord('A'))
+                    print(f"🔄 Trying to match number '{detected_model}' as letter {model_letter_from_number}")
+                    for model in exam_models:
+                        if str(model.get("model_number")).upper() == model_letter_from_number:
+                            selected_model = model
+                            print(f"✅ Found model by number-to-letter conversion: {model.get('model_number')}")
+                            break
+                except (ValueError, OverflowError):
+                    print(f"⚠️ Could not convert number '{detected_model}' to letter")
+            
+            # If no model match found, use fallback
+            if not selected_model:
+                print(f"⚠️ No exact match found for detected model '{detected_model}'. Using fallback.")
+                
+                if legacy_solution:
+                    exam_solution_path = legacy_solution
+                    selected_model = {"model_name": "Legacy Fallback", "model_number": "legacy"}
+                    detected_model = "legacy"
+                    print(f"✅ Using legacy fallback for scanner correction")
+                elif exam_models and any(model.get("solution_photo") for model in exam_models):
+                    # Use first available model
+                    for model in exam_models:
+                        if model.get("solution_photo"):
+                            selected_model = model
+                            detected_model = model.get("model_number", 1)
+                            print(f"⚠️ Using first available model as fallback: Model {detected_model}")
+                            break
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Detected model '{detected_model}' but no matching solution found and no fallback available. Available models: {[m.get('model_number') for m in exam_models]}. Legacy: {'available' if legacy_solution else 'not available'}."
+                    )
+            
+            # Set exam solution path from selected model
+            if selected_model and not exam_solution_path:
+                exam_solution_path = selected_model.get("solution_photo")
+                if not exam_solution_path:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Selected model {selected_model.get('model_number')} ({selected_model.get('model_name')}) has no solution photo uploaded"
+                    )
+        
+        # Step 8: Resolve exam solution path
+        possible_paths = [
+            exam_solution_path,
+            os.path.join("/home/ahmed/Desktop/teacher/venv/src", exam_solution_path),
+            os.path.join("..", "..", "venv", "src", exam_solution_path),
+        ]
+        
+        resolved_exam_path = None
+        for path in possible_paths:
+            if os.path.exists(path) and os.path.isfile(path):
+                resolved_exam_path = path
+                break
+        
+        if not resolved_exam_path:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Exam answer key file not found at any of these paths: {possible_paths}. Cannot perform automatic correction."
+            )
+        
+        # Step 9: Perform automatic exam correction
+        correction_result = correct_student_exam(
+            student_solution_path=student_solution_path,
+            exam_solution_path=resolved_exam_path,
+            final_degree=exam_data["final_degree"]
+        )
+        
+        # Add model detection info to correction result
+        if correction_result.get("success"):
+            correction_result["detected_model"] = detected_model
+            correction_result["model_confidence"] = 1.0  # High confidence for scanner mode
+            correction_result["model_name"] = selected_model.get("model_name") if selected_model else "Legacy Model"
+            correction_result["total_questions"] = exam_data["final_degree"]
+        
+        # Step 9: Prepare and send results to main backend
+        if correction_result["success"]:
+            student_degree = correction_result["student_score"]
+            degree_percentage = correction_result["percentage"]
+            correction_message = f"Scanner-based correction completed. Score: {student_degree}/{exam_data['final_degree']} ({degree_percentage}%)"
+        else:
+            student_degree = None
+            degree_percentage = None
+            correction_message = f"Scanner-based correction failed: {correction_result['message']}. Manual correction required."
+        
+        result_data = {
+            "student_id": backend_student_id,
+            "degree": student_degree,
+            "percentage": degree_percentage,
+            "delivery_time": datetime.utcnow().isoformat(),
+            "solution_photo": student_solution_path,
+            "correction_details": correction_result if correction_result["success"] else None
+        }
+        
+        async with httpx.AsyncClient() as client:
+            result_response = await client.post(
+                f"{MAIN_BACKEND_URL}/internal/exams/{exam_id}/results",
+                json=result_data,
+                timeout=30.0
+            )
+            
+            if result_response.status_code != 200:
+                raise HTTPException(
+                    status_code=result_response.status_code,
+                    detail=f"Failed to save results: {result_response.text}"
+                )
+        
+        # Step 10: Return response
+        return {
+            "message": correction_message,
+            "solution_path": student_solution_path,
+            "degree": student_degree,
+            "percentage": degree_percentage,
+            "student_id": detected_student_id,
+            "scanner_info": scanner_info,
+            "scan_settings": {
+                "resolution": scan_resolution,
+                "mode": scan_mode
+            },
+            "correction_details": correction_result if correction_result["success"] else None
+        }
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error during scanner-based exam correction: {str(e)}"
+        )
+    finally:
+        # Cleanup: disconnect scanner and remove temp files if needed
+        if scanner:
+            try:
+                scanner.disconnect()
+                print("📡 Scanner disconnected")
+            except:
+                pass
+        
+        # Note: We keep the scanned file for record-keeping
+        # If you want to remove temp files on error, add cleanup logic here
+
+
 @router.post("/{exam_id}/submit")
 async def submit_exam_solution(
     exam_id: str,
@@ -173,7 +702,7 @@ async def submit_exam_solution(
     force_manual_id: str = Form(None)     # Accept as string and convert
 ):
     """
-    Submit and automatically correct a student's exam solution.
+    Submit and automatically correct a student's exam solution (original upload method).
     This endpoint handles the correction processing while communicating
     with the main backend for exam data and result storage.
     """
