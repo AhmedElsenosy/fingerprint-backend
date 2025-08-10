@@ -1,0 +1,26 @@
+[
+    {
+        "device_id": "main_entrance",
+        "ip": "192.168.1.201",
+        "port": 4370,
+        "name": "Main Entrance",
+        "location": "Building A",
+        "enabled": true
+    },
+    {
+        "device_id": "lab_entrance",
+        "ip": "192.168.1.202",
+        "port": 4370,
+        "name": "Lab Entrance",
+        "location": "Building B",
+        "enabled": true
+    },
+    {
+        "device_id": "library_entrance",
+        "ip": "192.168.1.203",
+        "port": 4370,
+        "name": "Library Entrance",
+        "location": "Building C",
+        "enabled": true
+    }
+]

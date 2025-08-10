@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from app.schemas.student import StudentBase
 from app.utils.fingerprint import enroll_fingerprint
+from app.utils.multi_device_fingerprint import enroll_fingerprint_multi_device, device_manager
 from app.utils.fingerprint import connect_device
 from app.dependencies.auth import get_current_assistant
 from app.models.student import Student
@@ -68,10 +69,23 @@ async def register_student_with_fingerprint(
         uid = ids["uid"]
         student_id = ids["student_id"]
 
-    # Step 3: Enroll fingerprint
-    template = enroll_fingerprint(uid, f"{data.first_name}_{data.last_name}")
-    if not template:
-        raise HTTPException(status_code=500, detail="Failed to enroll fingerprint")
+    # Step 3: Enroll fingerprint using multi-device system
+    enrollment_result = enroll_fingerprint_multi_device(uid, f"{data.first_name}_{data.last_name}", device_manager)
+    
+    if not enrollment_result["success"]:
+        # Multi-device enrollment failed, try single device fallback
+        print(f"⚠️ Multi-device enrollment failed: {enrollment_result['error']}. Trying single device fallback.")
+        template = enroll_fingerprint(uid, f"{data.first_name}_{data.last_name}")
+        if not template:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to enroll fingerprint on all devices. Multi-device error: {enrollment_result['error']}"
+            )
+        device_used = None
+    else:
+        template = enrollment_result["template"]
+        device_used = enrollment_result["device_used"]
+        print(f"✅ Fingerprint enrolled successfully on device {device_used['name']} ({device_used['location']})")
 
     # Step 4: Handle online vs offline modes
     if online:

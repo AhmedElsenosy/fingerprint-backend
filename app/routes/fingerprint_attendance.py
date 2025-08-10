@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query
 from pydantic import BaseModel
 from app.utils.fingerprint import connect_device
+from app.utils.multi_device_fingerprint import device_manager, DeviceInfo
 from datetime import datetime, date
 import subprocess
 import asyncio
@@ -106,6 +107,190 @@ async def send_attendance_to_server_approved(uid: int, timestamp: str):
                 return {"success": False, "error": response.text, "status_code": response.status_code}
     except httpx.HTTPError as e:
         return {"success": False, "error": str(e), "status_code": 500}
+
+async def capture_from_device(device: DeviceInfo):
+    """Capture fingerprints from a specific device"""
+    configure_network()
+    conn = device.connection  # Use the existing connection from device manager
+    
+    if not conn:
+        print(f"❌ No connection available for device {device.name}")
+        return
+    
+    try:
+        print(f"📡 Listening for fingerprint on device {device.name} ({device.location})...")
+        online = await check_internet_connectivity()
+        mode = "ONLINE" if online else "OFFLINE"
+        print(f"🌐 Device {device.name} - Mode: {mode}")
+        
+        for attendance in conn.live_capture():
+            if not device_manager.is_capture_running():
+                print(f"🛑 Attendance stopped on device {device.name}. Exiting capture loop.")
+                break
+            
+            if attendance is not None:
+                if online:
+                    now_cairo = datetime.now(pytz.timezone("Africa/Cairo"))
+                    print(f"🔍 (ONLINE MODE - {device.name}) Attendance captured: UID={attendance.uid}, Time={now_cairo}")
+                    
+                    # Store in FingerprintSession (existing log)
+                    session = FingerprintSession(
+                        student_id=attendance.uid,
+                        name="",
+                        timestamp=now_cairo
+                    )
+                    await session.insert()
+                    
+                    # Get student info for broadcasting
+                    student = await Student.find_one(Student.uid == attendance.uid)
+                    student_name = f"{student.first_name} {student.last_name}" if student else "Unknown Student"
+                    
+                    # Broadcast attendance capture event with device info
+                    await manager.broadcast(
+                        f"Online attendance captured: UID={attendance.uid}, Time={now_cairo}, Name={student_name}, Device={device.name}, Location={device.location}, Status=Processing..."
+                    )
+                    
+                    # First, validate through main backend
+                    validation_result = await send_attendance_to_server(attendance.uid, now_cairo.isoformat())
+                    
+                    if validation_result["success"]:
+                        # Main backend approved - now save locally
+                        try:
+                            if student:
+                                # Initialize attendance dict if it doesn't exist
+                                if not hasattr(student, "attendance") or not isinstance(student.attendance, dict):
+                                    student.attendance = {}
+                                
+                                # Calculate day key based on existing attendance entries
+                                day_index = len(student.attendance) + 1
+                                day_key = f"day{day_index}"
+                                
+                                # Mark attendance as true
+                                student.attendance[day_key] = True
+                                await student.save()
+                                
+                                backend_data = validation_result["data"]
+                                
+                                # Broadcast approval event with device info
+                                await manager.broadcast(
+                                    f"✅ APPROVED: UID={attendance.uid}, Name={student_name}, Device={device.name}, Location={device.location}, Group={backend_data.get('group', 'Unknown')}, Day={day_key}, Status=Present"
+                                )
+                                
+                                print(f"✅ Device {device.name}: Student {student.first_name} {student.last_name} attendance approved and saved as {day_key}")
+                                print(f"📊 Group: {backend_data.get('group', 'Unknown')}, Status: Present")
+                            else:
+                                await manager.broadcast(
+                                    f"⚠️ WARNING: UID={attendance.uid} approved by backend but student not found in local database (Device: {device.name})"
+                                )
+                                print(f"⚠️ Device {device.name}: Student with UID {attendance.uid} not found in local database")
+                        except Exception as e:
+                            await manager.broadcast(
+                                f"⚠️ ERROR: UID={attendance.uid}, Name={student_name}, Device={device.name} - Failed to save locally: {str(e)}"
+                            )
+                            print(f"⚠️ Device {device.name}: Failed to update student attendance locally: {e}")
+                    else:
+                        # Main backend rejected - check if it's a wrong group situation
+                        error_msg = validation_result.get("error", "Unknown error")
+                        status_code = validation_result.get("status_code", "Unknown")
+                        
+                        # Check if this is a "wrong group day" error that needs assistant decision
+                        if (status_code == 400 and 
+                            ("Attendance not allowed on" in str(error_msg) or 
+                             "Group schedule" in str(error_msg))):
+                            
+                            # This is a wrong group situation - ask assistant for decision
+                            decision_id = f"{attendance.uid}_{int(now_cairo.timestamp())}"
+                            
+                            # Store pending decision with device info
+                            pending_decisions[decision_id] = {
+                                "uid": attendance.uid,
+                                "student_name": student_name,
+                                "timestamp": now_cairo.isoformat(),
+                                "error_msg": error_msg,
+                                "student": student,
+                                "device_id": device.device_id,
+                                "device_name": device.name,
+                                "device_location": device.location
+                            }
+                            
+                            # Create decision request message with device info
+                            decision_request = {
+                                "type": "decision_request",
+                                "decision_id": decision_id,
+                                "uid": attendance.uid,
+                                "student_name": student_name,
+                                "timestamp": now_cairo.isoformat(),
+                                "reason": error_msg,
+                                "device_name": device.name,
+                                "device_location": device.location,
+                                "message": f"⚠️ DECISION NEEDED: Student {student_name} (UID: {attendance.uid}) is trying to attend at {device.name} ({device.location}) but belongs to different group. Reason: {error_msg}"
+                            }
+                            
+                            # Broadcast decision request
+                            await manager.broadcast(json.dumps(decision_request))
+                            
+                            print(f"⏳ PENDING DECISION: Device {device.name}, UID={attendance.uid}, Student={student_name}, Waiting for assistant approval...")
+                            
+                        else:
+                            # Other type of rejection - auto reject
+                            await manager.broadcast(
+                                f"❌ REJECTED: UID={attendance.uid}, Name={student_name}, Device={device.name}, Location={device.location}, Reason={error_msg}, Status_Code={status_code}"
+                            )
+                            
+                            print(f"❌ Device {device.name}: Attendance rejected for UID {attendance.uid}: {error_msg} (Status: {status_code})")
+                else:
+                    # Offline mode: Save attendance locally without validation
+                    now_cairo = datetime.now(pytz.timezone("Africa/Cairo"))
+                    print(f"📝 (OFFLINE MODE - {device.name}) Attendance captured: UID={attendance.uid}, Time={now_cairo}")
+                    
+                    # Store in FingerprintSession (for logging)
+                    session = FingerprintSession(
+                        student_id=attendance.uid,
+                        name="",
+                        timestamp=now_cairo
+                    )
+                    await session.insert()
+                    
+                    # Find student by UID
+                    student = await Student.find_one(Student.uid == attendance.uid)
+                    if student:
+                        if not hasattr(student, "attendance") or not isinstance(student.attendance, dict):
+                            student.attendance = {}
+                        
+                        # Calculate day key based on existing attendance entries
+                        day_index = len(student.attendance) + 1
+                        day_key = f"day{day_index}_offline"
+                        
+                        # Mark attendance as offline with timestamp and device info
+                        student.attendance[day_key] = {
+                            "status": True,
+                            "timestamp": now_cairo.isoformat(),
+                            "synced": False,
+                            "device_id": device.device_id,
+                            "device_name": device.name,
+                            "device_location": device.location
+                        }
+                        await student.save()
+                        
+                        # Broadcast the offline attendance event with device info
+                        await manager.broadcast(
+                            f"Offline attendance captured: UID={attendance.uid}, Time={now_cairo}, Name={student.first_name} {student.last_name}, Device={device.name}, Location={device.location}"
+                        )
+                        
+                        print(f"✅ (OFFLINE MODE - {device.name}) Student {student.first_name} {student.last_name} attendance saved as {day_key}")
+                    else:
+                        print(f"⚠️ (OFFLINE MODE - {device.name}) Student with UID {attendance.uid} not found in local database")
+            
+            await asyncio.sleep(0.2)
+    
+    except Exception as e:
+        print(f"❌ Device {device.name} attendance error: {e}")
+        device.status = "error"
+        device.error_message = str(e)
+    
+    finally:
+        print(f"⚠️ Device {device.name} fingerprint capture ended")
+
 
 async def start_fingerprint_capture():
     global is_attendance_running
@@ -283,39 +468,158 @@ async def start_fingerprint_capture():
 
 @router.post("/start_attendance")
 async def start_attendance():
+    """Start attendance capture on all enabled devices"""
     global is_attendance_running, attendance_task
 
-    if is_attendance_running:
-        raise HTTPException(status_code=400, detail="Attendance already running")
+    if device_manager.is_capture_running():
+        raise HTTPException(status_code=400, detail="Multi-device attendance already running")
+    
+    # Try to start multi-device capture first
+    result = await device_manager.start_all_capture_tasks(capture_from_device)
+    
+    if result["success"]:
+        # Multi-device mode succeeded
+        return {
+            "message": result["message"],
+            "mode": "multi-device",
+            "devices_started": result["devices_started"],
+            "total_devices": result["total_devices"]
+        }
+    else:
+        # Multi-device failed, fall back to single device mode
+        print(f"⚠️ Multi-device startup failed: {result['message']}. Falling back to single device mode.")
+        
+        if is_attendance_running:
+            raise HTTPException(status_code=400, detail="Single-device attendance already running")
 
-    is_attendance_running = True
-    attendance_task = asyncio.create_task(start_fingerprint_capture())
-    return {"message": "✅ Fingerprint attendance started"}
+        is_attendance_running = True
+        attendance_task = asyncio.create_task(start_fingerprint_capture())
+        return {
+            "message": "✅ Fingerprint attendance started (single-device fallback)",
+            "mode": "single-device",
+            "fallback_reason": result["message"]
+        }
 
 @router.post("/stop_attendance")
 async def stop_attendance():
+    """Stop attendance capture on all devices"""
     global is_attendance_running, attendance_task
-
-    if not is_attendance_running:
-        raise HTTPException(status_code=400, detail="Attendance is not running")
-
-    is_attendance_running = False
     
-    # Cancel the attendance task if it's still running
-    if attendance_task and not attendance_task.done():
-        attendance_task.cancel()
+    stopped_devices = False
+    stopped_single = False
     
-    return {"message": "🛑 Fingerprint attendance stopped"}
+    # Try to stop multi-device capture
+    if device_manager.is_capture_running():
+        result = await device_manager.stop_all_capture_tasks()
+        if result["success"]:
+            stopped_devices = True
+    
+    # Try to stop single-device capture
+    if is_attendance_running:
+        is_attendance_running = False
+        
+        # Cancel the attendance task if it's still running
+        if attendance_task and not attendance_task.done():
+            attendance_task.cancel()
+            try:
+                await attendance_task
+            except asyncio.CancelledError:
+                pass
+        
+        stopped_single = True
+    
+    if not stopped_devices and not stopped_single:
+        raise HTTPException(status_code=400, detail="No attendance system is currently running")
+    
+    messages = []
+    if stopped_devices:
+        messages.append("Multi-device attendance stopped")
+    if stopped_single:
+        messages.append("Single-device attendance stopped")
+    
+    return {
+        "message": "🛑 " + " and ".join(messages),
+        "multi_device_stopped": stopped_devices,
+        "single_device_stopped": stopped_single
+    }
 
 
 @router.get("/attendance-status")
 async def get_attendance_status():
-    """Get current attendance system status"""
+    """Get current attendance system status (both single and multi-device)"""
+    multi_device_running = device_manager.is_capture_running()
+    single_device_running = is_attendance_running
+    
     return {
-        "is_running": is_attendance_running,
-        "task_status": "running" if attendance_task and not attendance_task.done() else "stopped",
+        "single_device": {
+            "is_running": single_device_running,
+            "task_status": "running" if attendance_task and not attendance_task.done() else "stopped"
+        },
+        "multi_device": {
+            "is_running": multi_device_running,
+            "active_tasks": len(device_manager.capture_tasks),
+            "total_devices": len(device_manager.get_enabled_devices())
+        },
+        "overall_status": "running" if (multi_device_running or single_device_running) else "stopped",
         "remote_backend": HOST_REMOTE_URL
     }
+
+
+@router.get("/devices")
+async def get_all_devices():
+    """Get information about all configured devices"""
+    devices_status = device_manager.get_device_status()
+    return {
+        "total_devices": len(devices_status),
+        "enabled_devices": len(device_manager.get_enabled_devices()),
+        "devices": devices_status
+    }
+
+
+@router.get("/devices/{device_id}")
+async def get_device_info(device_id: str):
+    """Get information about a specific device"""
+    device = device_manager.get_device(device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail=f"Device {device_id} not found")
+    
+    device_status = device_manager.get_device_status()
+    return device_status.get(device_id, {})
+
+
+@router.post("/devices/{device_id}/test-connection")
+async def test_device_connection(device_id: str):
+    """Test connection to a specific device"""
+    device = device_manager.get_device(device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail=f"Device {device_id} not found")
+    
+    # Test connection
+    conn = device_manager.connect_device(device)
+    if conn:
+        device_manager.disconnect_device(device)
+        return {
+            "success": True,
+            "message": f"Successfully connected to device {device.name}",
+            "device_info": {
+                "name": device.name,
+                "location": device.location,
+                "ip": device.ip,
+                "port": device.port
+            }
+        }
+    else:
+        return {
+            "success": False,
+            "message": f"Failed to connect to device {device.name}",
+            "error": device.error_message,
+            "device_info": {
+                "name": device.name,
+                "location": device.location,
+                "ip": device.ip,
+                "port": device.port
+            }
+        }
 
 
 @router.get("/student-attendance/{uid}")
