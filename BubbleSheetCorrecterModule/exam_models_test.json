@@ -1,0 +1,144 @@
+{
+  "exam_model_1": {
+    "aruco_markers": [
+      {
+        "id": 3,
+        "corners": [
+          [
+            2140.0,
+            2951.0
+          ],
+          [
+            2245.0,
+            2951.0
+          ],
+          [
+            2245.0,
+            3056.0
+          ],
+          [
+            2140.0,
+            3056.0
+          ]
+        ]
+      },
+      {
+        "id": 2,
+        "corners": [
+          [
+            135.0,
+            2951.0
+          ],
+          [
+            240.0,
+            2951.0
+          ],
+          [
+            240.0,
+            3056.0
+          ],
+          [
+            135.0,
+            3056.0
+          ]
+        ]
+      },
+      {
+        "id": 1,
+        "corners": [
+          [
+            2140.0,
+            311.0
+          ],
+          [
+            2245.0,
+            311.0
+          ],
+          [
+            2245.0,
+            417.0
+          ],
+          [
+            2140.0,
+            417.0
+          ]
+        ]
+      },
+      {
+        "id": 0,
+        "corners": [
+          [
+            135.0,
+            311.0
+          ],
+          [
+            240.0,
+            311.0
+          ],
+          [
+            240.0,
+            417.0
+          ],
+          [
+            135.0,
+            417.0
+          ]
+        ]
+      }
+    ],
+    "exam_model_bubbles": [
+      {
+        "model_letter": "A",
+        "relative_center": [
+          0.41981528127623846,
+          0.035629453681710214
+        ],
+        "relative_contour": null,
+        "absolute_center": [
+          1000,
+          120
+        ],
+        "circularity": 0.0,
+        "area": 0.0
+      },
+      {
+        "model_letter": "B",
+        "relative_center": [
+          0.5037783375314862,
+          0.035629453681710214
+        ],
+        "relative_contour": null,
+        "absolute_center": [
+          1200,
+          120
+        ],
+        "circularity": 0.0,
+        "area": 0.0
+      },
+      {
+        "model_letter": "C",
+        "relative_center": [
+          0.5877413937867338,
+          0.035629453681710214
+        ],
+        "relative_contour": null,
+        "absolute_center": [
+          1400,
+          120
+        ],
+        "circularity": 0.0,
+        "area": 0.0
+      }
+    ],
+    "image_size": {
+      "width": 2382,
+      "height": 3368
+    },
+    "source_image": "Arabic@4x-20.jpg",
+    "timestamp": "2025-06-04T11:13:08.670168",
+    "metadata": {
+      "num_bubbles": 3,
+      "collection_method": "manual_coordinates"
+    }
+  }
+}

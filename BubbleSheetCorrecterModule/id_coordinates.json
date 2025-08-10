@@ -1,0 +1,608 @@
+{
+  "id_bubbles": [
+    {
+      "column": 0,
+      "number": 0,
+      "relative_x": 0.5543478260869565,
+      "relative_y": 0.7282442748091603
+    },
+    {
+      "column": 0,
+      "number": 1,
+      "relative_x": 0.5533596837944664,
+      "relative_y": 0.750381679389313
+    },
+    {
+      "column": 0,
+      "number": 2,
+      "relative_x": 0.5523715415019763,
+      "relative_y": 0.7717557251908397
+    },
+    {
+      "column": 0,
+      "number": 3,
+      "relative_x": 0.5523715415019763,
+      "relative_y": 0.7938931297709924
+    },
+    {
+      "column": 0,
+      "number": 4,
+      "relative_x": 0.5533596837944664,
+      "relative_y": 0.816030534351145
+    },
+    {
+      "column": 0,
+      "number": 5,
+      "relative_x": 0.5533596837944664,
+      "relative_y": 0.8381679389312977
+    },
+    {
+      "column": 0,
+      "number": 6,
+      "relative_x": 0.5533596837944664,
+      "relative_y": 0.8595419847328244
+    },
+    {
+      "column": 0,
+      "number": 7,
+      "relative_x": 0.5523715415019763,
+      "relative_y": 0.8824427480916031
+    },
+    {
+      "column": 0,
+      "number": 8,
+      "relative_x": 0.5523715415019763,
+      "relative_y": 0.9038167938931297
+    },
+    {
+      "column": 0,
+      "number": 9,
+      "relative_x": 0.5533596837944664,
+      "relative_y": 0.9259541984732824
+    },
+    {
+      "column": 1,
+      "number": 0,
+      "relative_x": 0.5859683794466403,
+      "relative_y": 0.7290076335877863
+    },
+    {
+      "column": 1,
+      "number": 1,
+      "relative_x": 0.5859683794466403,
+      "relative_y": 0.750381679389313
+    },
+    {
+      "column": 1,
+      "number": 2,
+      "relative_x": 0.5849802371541502,
+      "relative_y": 0.7725190839694657
+    },
+    {
+      "column": 1,
+      "number": 3,
+      "relative_x": 0.5859683794466403,
+      "relative_y": 0.7946564885496183
+    },
+    {
+      "column": 1,
+      "number": 4,
+      "relative_x": 0.5859683794466403,
+      "relative_y": 0.816793893129771
+    },
+    {
+      "column": 1,
+      "number": 5,
+      "relative_x": 0.5859683794466403,
+      "relative_y": 0.8381679389312977
+    },
+    {
+      "column": 1,
+      "number": 6,
+      "relative_x": 0.5859683794466403,
+      "relative_y": 0.8603053435114504
+    },
+    {
+      "column": 1,
+      "number": 7,
+      "relative_x": 0.5859683794466403,
+      "relative_y": 0.8816793893129771
+    },
+    {
+      "column": 1,
+      "number": 8,
+      "relative_x": 0.5859683794466403,
+      "relative_y": 0.9045801526717557
+    },
+    {
+      "column": 1,
+      "number": 9,
+      "relative_x": 0.5859683794466403,
+      "relative_y": 0.9259541984732824
+    },
+    {
+      "column": 2,
+      "number": 0,
+      "relative_x": 0.6185770750988142,
+      "relative_y": 0.7290076335877863
+    },
+    {
+      "column": 2,
+      "number": 1,
+      "relative_x": 0.6185770750988142,
+      "relative_y": 0.750381679389313
+    },
+    {
+      "column": 2,
+      "number": 2,
+      "relative_x": 0.6185770750988142,
+      "relative_y": 0.7732824427480917
+    },
+    {
+      "column": 2,
+      "number": 3,
+      "relative_x": 0.6195652173913043,
+      "relative_y": 0.7946564885496183
+    },
+    {
+      "column": 2,
+      "number": 4,
+      "relative_x": 0.6185770750988142,
+      "relative_y": 0.816030534351145
+    },
+    {
+      "column": 2,
+      "number": 5,
+      "relative_x": 0.6195652173913043,
+      "relative_y": 0.8389312977099237
+    },
+    {
+      "column": 2,
+      "number": 6,
+      "relative_x": 0.6185770750988142,
+      "relative_y": 0.8603053435114504
+    },
+    {
+      "column": 2,
+      "number": 7,
+      "relative_x": 0.6195652173913043,
+      "relative_y": 0.8816793893129771
+    },
+    {
+      "column": 2,
+      "number": 8,
+      "relative_x": 0.6185770750988142,
+      "relative_y": 0.9038167938931297
+    },
+    {
+      "column": 2,
+      "number": 9,
+      "relative_x": 0.6185770750988142,
+      "relative_y": 0.9259541984732824
+    },
+    {
+      "column": 3,
+      "number": 0,
+      "relative_x": 0.6511857707509882,
+      "relative_y": 0.7282442748091603
+    },
+    {
+      "column": 3,
+      "number": 1,
+      "relative_x": 0.6511857707509882,
+      "relative_y": 0.750381679389313
+    },
+    {
+      "column": 3,
+      "number": 2,
+      "relative_x": 0.6511857707509882,
+      "relative_y": 0.7725190839694657
+    },
+    {
+      "column": 3,
+      "number": 3,
+      "relative_x": 0.6521739130434783,
+      "relative_y": 0.7946564885496183
+    },
+    {
+      "column": 3,
+      "number": 4,
+      "relative_x": 0.6511857707509882,
+      "relative_y": 0.816793893129771
+    },
+    {
+      "column": 3,
+      "number": 5,
+      "relative_x": 0.6521739130434783,
+      "relative_y": 0.8381679389312977
+    },
+    {
+      "column": 3,
+      "number": 6,
+      "relative_x": 0.6521739130434783,
+      "relative_y": 0.8595419847328244
+    },
+    {
+      "column": 3,
+      "number": 7,
+      "relative_x": 0.6521739130434783,
+      "relative_y": 0.8816793893129771
+    },
+    {
+      "column": 3,
+      "number": 8,
+      "relative_x": 0.6511857707509882,
+      "relative_y": 0.9038167938931297
+    },
+    {
+      "column": 3,
+      "number": 9,
+      "relative_x": 0.6511857707509882,
+      "relative_y": 0.9259541984732824
+    },
+    {
+      "column": 4,
+      "number": 0,
+      "relative_x": 0.6837944664031621,
+      "relative_y": 0.7282442748091603
+    },
+    {
+      "column": 4,
+      "number": 1,
+      "relative_x": 0.6847826086956522,
+      "relative_y": 0.749618320610687
+    },
+    {
+      "column": 4,
+      "number": 2,
+      "relative_x": 0.6837944664031621,
+      "relative_y": 0.7725190839694657
+    },
+    {
+      "column": 4,
+      "number": 3,
+      "relative_x": 0.6847826086956522,
+      "relative_y": 0.7946564885496183
+    },
+    {
+      "column": 4,
+      "number": 4,
+      "relative_x": 0.6837944664031621,
+      "relative_y": 0.816030534351145
+    },
+    {
+      "column": 4,
+      "number": 5,
+      "relative_x": 0.6837944664031621,
+      "relative_y": 0.8381679389312977
+    },
+    {
+      "column": 4,
+      "number": 6,
+      "relative_x": 0.6847826086956522,
+      "relative_y": 0.8603053435114504
+    },
+    {
+      "column": 4,
+      "number": 7,
+      "relative_x": 0.6837944664031621,
+      "relative_y": 0.8816793893129771
+    },
+    {
+      "column": 4,
+      "number": 8,
+      "relative_x": 0.6847826086956522,
+      "relative_y": 0.9038167938931297
+    },
+    {
+      "column": 4,
+      "number": 9,
+      "relative_x": 0.6847826086956522,
+      "relative_y": 0.9251908396946565
+    },
+    {
+      "column": 5,
+      "number": 0,
+      "relative_x": 0.7164031620553359,
+      "relative_y": 0.7290076335877863
+    },
+    {
+      "column": 5,
+      "number": 1,
+      "relative_x": 0.7164031620553359,
+      "relative_y": 0.751145038167939
+    },
+    {
+      "column": 5,
+      "number": 2,
+      "relative_x": 0.717391304347826,
+      "relative_y": 0.7732824427480917
+    },
+    {
+      "column": 5,
+      "number": 3,
+      "relative_x": 0.7164031620553359,
+      "relative_y": 0.7938931297709924
+    },
+    {
+      "column": 5,
+      "number": 4,
+      "relative_x": 0.7164031620553359,
+      "relative_y": 0.816030534351145
+    },
+    {
+      "column": 5,
+      "number": 5,
+      "relative_x": 0.7164031620553359,
+      "relative_y": 0.8381679389312977
+    },
+    {
+      "column": 5,
+      "number": 6,
+      "relative_x": 0.717391304347826,
+      "relative_y": 0.8595419847328244
+    },
+    {
+      "column": 5,
+      "number": 7,
+      "relative_x": 0.7164031620553359,
+      "relative_y": 0.8816793893129771
+    },
+    {
+      "column": 5,
+      "number": 8,
+      "relative_x": 0.717391304347826,
+      "relative_y": 0.9038167938931297
+    },
+    {
+      "column": 5,
+      "number": 9,
+      "relative_x": 0.717391304347826,
+      "relative_y": 0.9251908396946565
+    },
+    {
+      "column": 6,
+      "number": 0,
+      "relative_x": 0.7490118577075099,
+      "relative_y": 0.7290076335877863
+    },
+    {
+      "column": 6,
+      "number": 1,
+      "relative_x": 0.75,
+      "relative_y": 0.750381679389313
+    },
+    {
+      "column": 6,
+      "number": 2,
+      "relative_x": 0.75,
+      "relative_y": 0.7732824427480917
+    },
+    {
+      "column": 6,
+      "number": 3,
+      "relative_x": 0.7490118577075099,
+      "relative_y": 0.7946564885496183
+    },
+    {
+      "column": 6,
+      "number": 4,
+      "relative_x": 0.75,
+      "relative_y": 0.815267175572519
+    },
+    {
+      "column": 6,
+      "number": 5,
+      "relative_x": 0.75,
+      "relative_y": 0.8381679389312977
+    },
+    {
+      "column": 6,
+      "number": 6,
+      "relative_x": 0.7509881422924901,
+      "relative_y": 0.8595419847328244
+    },
+    {
+      "column": 6,
+      "number": 7,
+      "relative_x": 0.75,
+      "relative_y": 0.8816793893129771
+    },
+    {
+      "column": 6,
+      "number": 8,
+      "relative_x": 0.75,
+      "relative_y": 0.9030534351145039
+    },
+    {
+      "column": 6,
+      "number": 9,
+      "relative_x": 0.75,
+      "relative_y": 0.9244274809160306
+    },
+    {
+      "column": 7,
+      "number": 0,
+      "relative_x": 0.782608695652174,
+      "relative_y": 0.7290076335877863
+    },
+    {
+      "column": 7,
+      "number": 1,
+      "relative_x": 0.782608695652174,
+      "relative_y": 0.750381679389313
+    },
+    {
+      "column": 7,
+      "number": 2,
+      "relative_x": 0.782608695652174,
+      "relative_y": 0.7725190839694657
+    },
+    {
+      "column": 7,
+      "number": 3,
+      "relative_x": 0.7835968379446641,
+      "relative_y": 0.7946564885496183
+    },
+    {
+      "column": 7,
+      "number": 4,
+      "relative_x": 0.782608695652174,
+      "relative_y": 0.816030534351145
+    },
+    {
+      "column": 7,
+      "number": 5,
+      "relative_x": 0.7835968379446641,
+      "relative_y": 0.8381679389312977
+    },
+    {
+      "column": 7,
+      "number": 6,
+      "relative_x": 0.782608695652174,
+      "relative_y": 0.8603053435114504
+    },
+    {
+      "column": 7,
+      "number": 7,
+      "relative_x": 0.782608695652174,
+      "relative_y": 0.8816793893129771
+    },
+    {
+      "column": 7,
+      "number": 8,
+      "relative_x": 0.7835968379446641,
+      "relative_y": 0.9038167938931297
+    },
+    {
+      "column": 7,
+      "number": 9,
+      "relative_x": 0.782608695652174,
+      "relative_y": 0.9251908396946565
+    },
+    {
+      "column": 8,
+      "number": 0,
+      "relative_x": 0.8152173913043478,
+      "relative_y": 0.7290076335877863
+    },
+    {
+      "column": 8,
+      "number": 1,
+      "relative_x": 0.8162055335968379,
+      "relative_y": 0.750381679389313
+    },
+    {
+      "column": 8,
+      "number": 2,
+      "relative_x": 0.8142292490118577,
+      "relative_y": 0.7725190839694657
+    },
+    {
+      "column": 8,
+      "number": 3,
+      "relative_x": 0.8152173913043478,
+      "relative_y": 0.7946564885496183
+    },
+    {
+      "column": 8,
+      "number": 4,
+      "relative_x": 0.8162055335968379,
+      "relative_y": 0.816030534351145
+    },
+    {
+      "column": 8,
+      "number": 5,
+      "relative_x": 0.8152173913043478,
+      "relative_y": 0.8381679389312977
+    },
+    {
+      "column": 8,
+      "number": 6,
+      "relative_x": 0.8142292490118577,
+      "relative_y": 0.8603053435114504
+    },
+    {
+      "column": 8,
+      "number": 7,
+      "relative_x": 0.8152173913043478,
+      "relative_y": 0.8824427480916031
+    },
+    {
+      "column": 8,
+      "number": 8,
+      "relative_x": 0.8152173913043478,
+      "relative_y": 0.9038167938931297
+    },
+    {
+      "column": 8,
+      "number": 9,
+      "relative_x": 0.8152173913043478,
+      "relative_y": 0.9244274809160306
+    },
+    {
+      "column": 9,
+      "number": 0,
+      "relative_x": 0.8478260869565217,
+      "relative_y": 0.7290076335877863
+    },
+    {
+      "column": 9,
+      "number": 1,
+      "relative_x": 0.8478260869565217,
+      "relative_y": 0.751145038167939
+    },
+    {
+      "column": 9,
+      "number": 2,
+      "relative_x": 0.8478260869565217,
+      "relative_y": 0.7717557251908397
+    },
+    {
+      "column": 9,
+      "number": 3,
+      "relative_x": 0.8478260869565217,
+      "relative_y": 0.7938931297709924
+    },
+    {
+      "column": 9,
+      "number": 4,
+      "relative_x": 0.8488142292490118,
+      "relative_y": 0.816030534351145
+    },
+    {
+      "column": 9,
+      "number": 5,
+      "relative_x": 0.8478260869565217,
+      "relative_y": 0.8381679389312977
+    },
+    {
+      "column": 9,
+      "number": 6,
+      "relative_x": 0.8488142292490118,
+      "relative_y": 0.8603053435114504
+    },
+    {
+      "column": 9,
+      "number": 7,
+      "relative_x": 0.8478260869565217,
+      "relative_y": 0.8816793893129771
+    },
+    {
+      "column": 9,
+      "number": 8,
+      "relative_x": 0.8488142292490118,
+      "relative_y": 0.9038167938931297
+    },
+    {
+      "column": 9,
+      "number": 9,
+      "relative_x": 0.8478260869565217,
+      "relative_y": 0.9244274809160306
+    }
+  ],
+  "image_size": {
+    "width": 1012,
+    "height": 1310
+  }
+}
