@@ -20,14 +20,23 @@ async def send_attendance_to_server(uid: int, timestamp: str):
                 json={
                     "uid": uid,
                     "timestamp": timestamp
-                }
+                },
+                timeout=30.0
             )
             if response.status_code == 200:
                 return {"success": True, "data": response.json()}
             else:
-                return {"success": False, "error": response.text, "status_code": response.status_code}
+                error_msg = f"Main backend error (HTTP {response.status_code}): {response.text}"
+                print(f"⚠️ {error_msg}")
+                return {"success": False, "error": error_msg, "status_code": response.status_code}
     except httpx.HTTPError as e:
-        return {"success": False, "error": str(e), "status_code": 500}
+        error_msg = f"HTTP error: {str(e)}"
+        print(f"⚠️ {error_msg}")
+        return {"success": False, "error": error_msg, "status_code": 500}
+    except Exception as e:
+        error_msg = f"Unexpected error: {str(e)}"
+        print(f"⚠️ {error_msg}")
+        return {"success": False, "error": error_msg, "status_code": 500}
 
 
 async def sync_offline_attendance():

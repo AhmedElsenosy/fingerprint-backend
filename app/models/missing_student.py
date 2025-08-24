@@ -27,14 +27,14 @@ class MissingStudent(Document):
     student_id: str
     first_name: str
     last_name: str
-    email: EmailStr
+    email: Optional[EmailStr] = None
     phone_number: str
     guardian_number: str
-    birth_date: date
-    national_id: str
+    birth_date: Optional[date] = None
+    national_id: Optional[str] = None
     gender: Gender
     level: Level
-    school_name: str
+    school_name: Optional[str] = None
     is_subscription: bool = True
     fingerprint_template: Optional[str] = None
     attendance: Dict[str, bool] = Field(default_factory=dict)  # Format: {"2025-01-15": true}

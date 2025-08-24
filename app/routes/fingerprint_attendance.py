@@ -15,6 +15,9 @@ import os
 from typing import List, Dict
 import json
 
+# Import Socket.IO broadcast function
+from app.utils.socketio_manager import broadcast_attendance
+
 # Connection Manager to handle WebSocket connections
 class ConnectionManager:
     def __init__(self):
@@ -145,12 +148,7 @@ async def capture_from_device(device: DeviceInfo):
                     student = await Student.find_one(Student.uid == attendance.uid)
                     student_name = f"{student.first_name} {student.last_name}" if student else "Unknown Student"
                     
-                    # Broadcast attendance capture event with device info
-                    await manager.broadcast(
-                        f"Online attendance captured: UID={attendance.uid}, Time={now_cairo}, Name={student_name}, Device={device.name}, Location={device.location}, Status=Processing..."
-                    )
-                    
-                    # First, validate through main backend
+                    # First, validate through main backend BEFORE broadcasting anything
                     validation_result = await send_attendance_to_server(attendance.uid, now_cairo.isoformat())
                     
                     if validation_result["success"]:
@@ -161,22 +159,41 @@ async def capture_from_device(device: DeviceInfo):
                                 if not hasattr(student, "attendance") or not isinstance(student.attendance, dict):
                                     student.attendance = {}
                                 
-                                # Calculate day key based on existing attendance entries
-                                day_index = len(student.attendance) + 1
-                                day_key = f"day{day_index}"
+                                # Use date as key (YYYY-MM-DD format)
+                                date_key = now_cairo.strftime("%Y-%m-%d")
                                 
                                 # Mark attendance as true
-                                student.attendance[day_key] = True
+                                student.attendance[date_key] = True
                                 await student.save()
                                 
                                 backend_data = validation_result["data"]
                                 
-                                # Broadcast approval event with device info
+                                # Broadcast approval event with device info (WebSocket)
                                 await manager.broadcast(
-                                    f"✅ APPROVED: UID={attendance.uid}, Name={student_name}, Device={device.name}, Location={device.location}, Group={backend_data.get('group', 'Unknown')}, Day={day_key}, Status=Present"
+                                    f"✅ APPROVED: UID={attendance.uid}, Name={student_name}, Device={device.name}, Location={device.location}, Group={backend_data.get('group', 'Unknown')}, Date={date_key}, Status=Present"
                                 )
                                 
-                                print(f"✅ Device {device.name}: Student {student.first_name} {student.last_name} attendance approved and saved as {day_key}")
+                                # Also broadcast via Socket.IO for frontend
+                                await broadcast_attendance({
+                                    "type": "attendance_update",
+                                    "uid": attendance.uid,
+                                    "student_id": attendance.uid,
+                                    "student_name": student_name,
+                                    "first_name": student.first_name,
+                                    "last_name": student.last_name,
+                                    "status": "approved",
+                                    "mode": "online",
+                                    "device_name": device.name,
+                                    "device_location": device.location,
+                                    "group": backend_data.get('group', 'Unknown'),
+                                    "date_key": date_key,
+                                    "timestamp": now_cairo.isoformat(),
+                                    "is_correct_group": True,
+                                    "requires_approval": False,
+                                    "message": f"✅ تم تسجيل حضور {student_name} بنجاح"
+                                })
+                                
+                                print(f"✅ Device {device.name}: Student {student.first_name} {student.last_name} attendance approved and saved as {date_key}")
                                 print(f"📊 Group: {backend_data.get('group', 'Unknown')}, Status: Present")
                             else:
                                 await manager.broadcast(
@@ -189,55 +206,167 @@ async def capture_from_device(device: DeviceInfo):
                             )
                             print(f"⚠️ Device {device.name}: Failed to update student attendance locally: {e}")
                     else:
-                        # Main backend rejected - check if it's a wrong group situation
+                        # Main backend rejected - FIRST CHECK STUDENT ELIGIBILITY
                         error_msg = validation_result.get("error", "Unknown error")
                         status_code = validation_result.get("status_code", "Unknown")
                         
-                        # Check if this is a "wrong group day" error that needs assistant decision
-                        if (status_code == 400 and 
-                            ("Attendance not allowed on" in str(error_msg) or 
-                             "Group schedule" in str(error_msg))):
-                            
-                            # This is a wrong group situation - ask assistant for decision
-                            decision_id = f"{attendance.uid}_{int(now_cairo.timestamp())}"
-                            
-                            # Store pending decision with device info
-                            pending_decisions[decision_id] = {
-                                "uid": attendance.uid,
-                                "student_name": student_name,
-                                "timestamp": now_cairo.isoformat(),
-                                "error_msg": error_msg,
-                                "student": student,
-                                "device_id": device.device_id,
-                                "device_name": device.name,
-                                "device_location": device.location
-                            }
-                            
-                            # Create decision request message with device info
-                            decision_request = {
-                                "type": "decision_request",
-                                "decision_id": decision_id,
-                                "uid": attendance.uid,
-                                "student_name": student_name,
-                                "timestamp": now_cairo.isoformat(),
-                                "reason": error_msg,
-                                "device_name": device.name,
-                                "device_location": device.location,
-                                "message": f"⚠️ DECISION NEEDED: Student {student_name} (UID: {attendance.uid}) is trying to attend at {device.name} ({device.location}) but belongs to different group. Reason: {error_msg}"
-                            }
-                            
-                            # Broadcast decision request
-                            await manager.broadcast(json.dumps(decision_request))
-                            
-                            print(f"⏳ PENDING DECISION: Device {device.name}, UID={attendance.uid}, Student={student_name}, Waiting for assistant approval...")
-                            
-                        else:
-                            # Other type of rejection - auto reject
+                        print(f"🔍 DEBUG: Backend rejection - Status Code: {status_code}, Error: {error_msg}")
+                        
+                        # PRE-CHECK: Verify student exists and has group assignment
+                        print(f"🔍 PRE-CHECK: Verifying student eligibility for pending decision...")
+                        
+                        # SPECIAL CHECK 1: Auto-reject if backend says "Student not found" (404)
+                        if (status_code == 404 or "Student not found" in str(error_msg)):
+                            print(f"❌ AUTO-REJECT: Backend returned 'Student not found' - no pending decision needed")
+                            # Auto reject - no pending decision
                             await manager.broadcast(
-                                f"❌ REJECTED: UID={attendance.uid}, Name={student_name}, Device={device.name}, Location={device.location}, Reason={error_msg}, Status_Code={status_code}"
+                                f"❌ AUTO-REJECTED: Student {student_name} (UID={attendance.uid}) not found in main backend (Device: {device.name}, Location: {device.location})"
                             )
                             
-                            print(f"❌ Device {device.name}: Attendance rejected for UID {attendance.uid}: {error_msg} (Status: {status_code})")
+                            # Also broadcast rejection via Socket.IO
+                            await broadcast_attendance({
+                                "type": "attendance_update",
+                                "uid": attendance.uid,
+                                "student_id": attendance.uid,
+                                "student_name": student_name,
+                                "first_name": student.first_name if student else "Unknown",
+                                "last_name": student.last_name if student else "Student",
+                                "status": "rejected",
+                                "mode": "online",
+                                "device_name": device.name,
+                                "device_location": device.location,
+                                "group": "Unknown",
+                                "date_key": now_cairo.strftime("%Y-%m-%d"),
+                                "timestamp": now_cairo.isoformat(),
+                                "is_correct_group": False,
+                                "requires_approval": False,
+                                "error_reason": "Student not found in main backend",
+                                "message": f"❌ تم رفض {student_name}: غير موجود في النظام"
+                            })
+                            
+                            print(f"❌ Device {device.name}: Student {student_name} (UID {attendance.uid}) auto-rejected - not found in backend")
+                            continue  # Skip to next attendance capture
+                        
+                        # Pre-checks passed, now check if this requires a pending decision
+                        # Check 1: Student exists in local database (already done above)
+                        # Check 2: Student has group assignment (already done above)
+                        
+                        # Check 1: Student exists in local database
+                        if not student:
+                            print(f"❌ PRE-CHECK FAILED: Student with UID {attendance.uid} not found in local database")
+                            # Auto reject - no pending decision
+                            await manager.broadcast(
+                                f"❌ AUTO-REJECTED: UID={attendance.uid} not found in student database (Device: {device.name}, Location: {device.location})"
+                            )
+                            
+                            # Also broadcast rejection via Socket.IO
+                            await broadcast_attendance({
+                                "type": "attendance_update",
+                                "uid": attendance.uid,
+                                "student_id": attendance.uid,
+                                "student_name": "Unknown Student",
+                                "first_name": "Unknown",
+                                "last_name": "Student",
+                                "status": "rejected",
+                                "mode": "online",
+                                "device_name": device.name,
+                                "device_location": device.location,
+                                "group": "Unknown",
+                                "date_key": now_cairo.strftime("%Y-%m-%d"),
+                                "timestamp": now_cairo.isoformat(),
+                                "is_correct_group": False,
+                                "requires_approval": False,
+                                "error_reason": "Student not found in local database",
+                                "message": f"❌ طالب غير معروف: UID {attendance.uid}"
+                            })
+                            
+                            print(f"❌ Device {device.name}: UID {attendance.uid} auto-rejected - student not found")
+                            continue  # Skip to next attendance capture
+                        
+                        # Check 2: Student has group assignment (level field)
+                        student_level = getattr(student, 'level', None)
+                        if student_level is None:
+                            print(f"❌ PRE-CHECK FAILED: Student {student_name} (UID: {attendance.uid}) has no group/level assignment")
+                            # Auto reject - no pending decision
+                            await manager.broadcast(
+                                f"❌ AUTO-REJECTED: Student {student_name} (UID={attendance.uid}) has no group assignment (Device: {device.name}, Location: {device.location})"
+                            )
+                            
+                            # Also broadcast rejection via Socket.IO
+                            await broadcast_attendance({
+                                "type": "attendance_update",
+                                "uid": attendance.uid,
+                                "student_id": attendance.uid,
+                                "student_name": student_name,
+                                "first_name": student.first_name,
+                                "last_name": student.last_name,
+                                "status": "rejected",
+                                "mode": "online",
+                                "device_name": device.name,
+                                "device_location": device.location,
+                                "group": "No Group",
+                                "date_key": now_cairo.strftime("%Y-%m-%d"),
+                                "timestamp": now_cairo.isoformat(),
+                                "is_correct_group": False,
+                                "requires_approval": False,
+                                "error_reason": "Student has no group assignment",
+                                "message": f"❌ تم رفض {student_name}: غير معين لمجموعة"
+                            })
+                            
+                            print(f"❌ Device {device.name}: Student {student_name} (UID {attendance.uid}) auto-rejected - no group assignment")
+                            continue  # Skip to next attendance capture
+                        
+                        # PRE-CHECK PASSED: Student exists and has group assignment
+                        print(f"✅ PRE-CHECK PASSED: Student {student_name} (UID: {attendance.uid}) exists and has level/group: {student_level}")
+                        print(f"🚨 CREATING PENDING DECISION: Backend rejected attendance, asking assistant for decision")
+                        
+                        # Create pending decision for backend rejections (only for eligible students)
+                        decision_id = f"{attendance.uid}_{int(now_cairo.timestamp())}"
+                        print(f"🔑 Generated decision_id: {decision_id}")
+                        
+                        # Store pending decision with device info
+                        pending_decision_data = {
+                            "uid": attendance.uid,
+                            "student_name": student_name,
+                            "timestamp": now_cairo.isoformat(),
+                            "error_msg": error_msg,
+                            "student": student,
+                            "device_id": device.device_id,
+                            "device_name": device.name,
+                            "device_location": device.location,
+                            "status_code": status_code,
+                            "student_level": int(student_level) if student_level else None
+                        }
+                        
+                        pending_decisions[decision_id] = pending_decision_data
+                        print(f"💾 Stored pending decision. Total pending decisions: {len(pending_decisions)}")
+                        print(f"💾 Pending decisions keys: {list(pending_decisions.keys())}")
+                        
+                        # Create decision request message with device info
+                        decision_request = {
+                            "type": "decision_request",
+                            "decision_id": decision_id,
+                            "uid": attendance.uid,
+                            "student_name": student_name,
+                            "timestamp": now_cairo.isoformat(),
+                            "reason": error_msg,
+                            "device_name": device.name,
+                            "device_location": device.location,
+                            "status_code": status_code,
+                            "student_level": int(student_level),
+                            "message": f"⚠️ DECISION NEEDED: Student {student_name} (UID: {attendance.uid}, Level: {student_level}) attendance was rejected by backend at {device.name} ({device.location}). Reason: {error_msg} (Status: {status_code}). Assistant approval required."
+                        }
+                        
+                        # Broadcast decision request via WebSocket
+                        print(f"📡 Broadcasting decision request via WebSocket: {json.dumps(decision_request)}")
+                        await manager.broadcast(json.dumps(decision_request))
+                        
+                        # Also broadcast via Socket.IO
+                        print(f"📡 About to broadcast decision request via Socket.IO: {decision_request}")
+                        await broadcast_attendance(decision_request)
+                        print(f"📡 Socket.IO broadcast completed")
+                        
+                        print(f"⌛ PENDING DECISION: Device {device.name}, UID={attendance.uid}, Student={student_name}, Level={student_level}, Waiting for assistant approval...")
                 else:
                     # Offline mode: Save attendance locally without validation
                     now_cairo = datetime.now(pytz.timezone("Africa/Cairo"))
@@ -257,12 +386,12 @@ async def capture_from_device(device: DeviceInfo):
                         if not hasattr(student, "attendance") or not isinstance(student.attendance, dict):
                             student.attendance = {}
                         
-                        # Calculate day key based on existing attendance entries
-                        day_index = len(student.attendance) + 1
-                        day_key = f"day{day_index}_offline"
+                        # Use date as key for offline attendance (YYYY-MM-DD format)
+                        date_key = now_cairo.strftime("%Y-%m-%d")
+                        offline_key = f"{date_key}_offline"
                         
                         # Mark attendance as offline with timestamp and device info
-                        student.attendance[day_key] = {
+                        student.attendance[offline_key] = {
                             "status": True,
                             "timestamp": now_cairo.isoformat(),
                             "synced": False,
@@ -277,7 +406,7 @@ async def capture_from_device(device: DeviceInfo):
                             f"Offline attendance captured: UID={attendance.uid}, Time={now_cairo}, Name={student.first_name} {student.last_name}, Device={device.name}, Location={device.location}"
                         )
                         
-                        print(f"✅ (OFFLINE MODE - {device.name}) Student {student.first_name} {student.last_name} attendance saved as {day_key}")
+                        print(f"✅ (OFFLINE MODE - {device.name}) Student {student.first_name} {student.last_name} attendance saved as {offline_key}")
                     else:
                         print(f"⚠️ (OFFLINE MODE - {device.name}) Student with UID {attendance.uid} not found in local database")
             
@@ -347,22 +476,21 @@ async def start_fingerprint_capture():
                                 if not hasattr(student, "attendance") or not isinstance(student.attendance, dict):
                                     student.attendance = {}
                                 
-                                # Calculate day key based on existing attendance entries
-                                day_index = len(student.attendance) + 1
-                                day_key = f"day{day_index}"
+                                # Use date as key (YYYY-MM-DD format)
+                                date_key = now_cairo.strftime("%Y-%m-%d")
                                 
                                 # Mark attendance as true
-                                student.attendance[day_key] = True
+                                student.attendance[date_key] = True
                                 await student.save()
                                 
                                 backend_data = validation_result["data"]
                                 
                                 # Broadcast approval event
                                 await manager.broadcast(
-                                    f"✅ APPROVED: UID={attendance.uid}, Name={student_name}, Group={backend_data.get('group', 'Unknown')}, Day={day_key}, Status=Present"
+                                    f"✅ APPROVED: UID={attendance.uid}, Name={student_name}, Group={backend_data.get('group', 'Unknown')}, Date={date_key}, Status=Present"
                                 )
                                 
-                                print(f"✅ Student {student.first_name} {student.last_name} attendance approved and saved as {day_key}")
+                                print(f"✅ Student {student.first_name} {student.last_name} attendance approved and saved as {date_key}")
                                 print(f"📊 Group: {backend_data.get('group', 'Unknown')}, Status: Present")
                             else:
                                 await manager.broadcast(
@@ -640,6 +768,11 @@ async def get_student_attendance(uid: int):
 @router.get("/pending-decisions")
 async def get_pending_decisions():
     """Get all pending attendance decisions waiting for assistant approval"""
+    print(f"🔍 DEBUG GET /pending-decisions: Current pending_decisions state:")
+    print(f"   - Total count: {len(pending_decisions)}")
+    print(f"   - Keys: {list(pending_decisions.keys())}")
+    print(f"   - Full data: {pending_decisions}")
+    
     return {
         "pending_count": len(pending_decisions),
         "decisions": [
@@ -652,6 +785,15 @@ async def get_pending_decisions():
             }
             for decision_id, data in pending_decisions.items()
         ]
+    }
+
+@router.get("/debug/pending-decisions-raw")
+async def debug_pending_decisions_raw():
+    """Debug endpoint to see raw pending decisions data"""
+    return {
+        "raw_pending_decisions": pending_decisions,
+        "count": len(pending_decisions),
+        "keys": list(pending_decisions.keys())
     }
 
 
@@ -689,10 +831,15 @@ async def process_assistant_decision(decision_id: str, decision: str):
                 if not hasattr(student, "attendance") or not isinstance(student.attendance, dict):
                     student.attendance = {}
                 
-                day_index = len(student.attendance) + 1
-                day_key = f"day{day_index}"
+                # Use date format from pending decision timestamp
+                from datetime import datetime
+                import pytz
+                timestamp_dt = datetime.fromisoformat(pending_data['timestamp'].replace('Z', '+00:00'))
+                cairo_tz = pytz.timezone('Africa/Cairo')
+                cairo_dt = timestamp_dt.astimezone(cairo_tz) if timestamp_dt.tzinfo else cairo_tz.localize(timestamp_dt)
+                date_key = cairo_dt.strftime("%Y-%m-%d")
                 
-                student.attendance[day_key] = True
+                student.attendance[date_key] = True
                 await student.save()
                 
                 # Send attendance to main backend with assistant_approved=True
@@ -709,10 +856,10 @@ async def process_assistant_decision(decision_id: str, decision: str):
                 
                 # Broadcast approval
                 await manager.broadcast(
-                    f"✅ ASSISTANT APPROVED: UID={pending_data['uid']}, Name={pending_data['student_name']}, Day={day_key}, Status=Present (Manual Override)"
+                    f"✅ ASSISTANT APPROVED: UID={pending_data['uid']}, Name={pending_data['student_name']}, Date={date_key}, Status=Present (Manual Override)"
                 )
                 
-                print(f"✅ ASSISTANT APPROVED: UID={pending_data['uid']}, Student={pending_data['student_name']}, Day={day_key}")
+                print(f"✅ ASSISTANT APPROVED: UID={pending_data['uid']}, Student={pending_data['student_name']}, Date={date_key}")
                 
                 # Remove from pending
                 del pending_decisions[decision_id]

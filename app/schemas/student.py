@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from datetime import date, datetime
 from typing import Optional
 from enum import Enum
@@ -18,11 +18,16 @@ class Gender(str, Enum):
 class StudentBase(BaseModel):
     first_name: str
     last_name: str
-    email: EmailStr
+    email: Optional[EmailStr] = Field(default=None)
     phone_number: str
     guardian_number: str
-    birth_date: date
-    national_id: str
+    birth_date: Optional[date] = Field(default=None)
+    national_id: Optional[str] = Field(default=None)
     gender: Gender
     level: Level
-    school_name: str
+    school_name: Optional[str] = Field(default=None)
+    
+    class Config:
+        # Allow None values for optional fields
+        use_enum_values = True
+        validate_assignment = True

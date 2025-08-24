@@ -1,13 +1,13 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from app.schemas.student import StudentBase
 from app.utils.fingerprint import enroll_fingerprint
-from app.utils.multi_device_fingerprint import enroll_fingerprint_multi_device, device_manager
+from app.utils.multi_device_fingerprint import enroll_fingerprint_multi_device, device_manager, delete_student_from_all_devices
 from app.utils.fingerprint import connect_device
 from app.dependencies.auth import get_current_assistant
 from app.models.student import Student
 from app.models.missing_student import MissingStudent
 from app.utils.internet_check import check_internet_connectivity
-from app.utils.local_id_generator import get_next_student_id_offline, sync_local_counter_with_remote, initialize_student_counter
+from app.utils.local_id_generator import get_next_student_id_offline, sync_local_counter_with_remote, initialize_student_counter, peek_next_student_id_offline, increment_student_counter
 import subprocess
 import httpx
 import os
@@ -21,6 +21,18 @@ router = APIRouter(
     prefix="/students",
     tags=["Students"],
 )
+
+@router.get("/", summary="List students (newest first)")
+async def list_students(skip: int = 0, limit: int = 100):
+    """
+    Return students sorted by most recently added first.
+    Uses the document id timestamp for ordering (descending).
+    """
+    try:
+        students = await Student.find_all().sort(-Student.id).skip(skip).limit(limit).to_list()
+        return {"count": len(students), "data": students}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch students: {e}")
 
 def configure_network():
     result = subprocess.run(
@@ -46,42 +58,86 @@ async def register_student_with_fingerprint(
     # Step 1: Check internet connectivity
     online = await check_internet_connectivity()
 
-    # Step 2: Get UID and student_id based on connectivity
+    # Step 2: Get UID and student_id based on connectivity (WITHOUT incrementing counters)
     if online:
         token = request.headers.get("authorization")
         headers = {"Authorization": token} if token else {}
 
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{HOST_REMOTE_URL}/students/next-ids", headers=headers)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(f"{HOST_REMOTE_URL}/students/next-ids", headers=headers)
 
-        if response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Failed to get UID and student_id from main backend")
+            if response.status_code != 200:
+                raise HTTPException(status_code=500, detail="Failed to get UID and student_id from main backend")
 
-        identifiers = response.json()
-        uid = identifiers["uid"]
-        student_id = identifiers["student_id"]
+            identifiers = response.json()
+            uid = identifiers["uid"]
+            student_id = identifiers["student_id"]
 
-        # Sync local counter with remote
-        await sync_local_counter_with_remote(uid)
+            # Sync local counter with remote (this sets the counter to match, doesn't increment)
+            await sync_local_counter_with_remote(uid - 1)  # Set to one less so next peek gives the right value
+        except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.RequestError) as e:
+            print(f"⚠️ Connection timeout or error when getting IDs from main backend: {e}")
+            print("🔄 Falling back to offline mode...")
+            online = False
+            # Fall through to offline mode
+            ids = await peek_next_student_id_offline()  # Use peek instead of get to avoid incrementing
+            uid = ids["uid"]
+            student_id = ids["student_id"]
     else:
-        # Offline: get local IDs
-        ids = await get_next_student_id_offline()
+        # Offline: get local IDs WITHOUT incrementing
+        ids = await peek_next_student_id_offline()  # Use peek instead of get to avoid incrementing
         uid = ids["uid"]
         student_id = ids["student_id"]
 
-    # Step 3: Enroll fingerprint using multi-device system
+    # Step 3: Enroll fingerprint using multi-device system with enhanced error handling
+    print(f"🔍 Starting fingerprint enrollment for {data.first_name} {data.last_name} (UID: {uid})")
+    
+    # First attempt at enrollment
     enrollment_result = enroll_fingerprint_multi_device(uid, f"{data.first_name}_{data.last_name}", device_manager)
     
+    # If enrollment failed, check if it's due to user already existing
+    if not enrollment_result["success"]:
+        error_msg = enrollment_result.get("error", "").lower()
+        
+        # Check if the error is related to user already existing
+        if "already exists" in error_msg or "user with uid" in error_msg or "duplicate" in error_msg:
+            print(f"⚠️ Detected 'user already exists' error. Attempting to delete student UID={uid} from all devices...")
+            
+            # Delete the student from all devices
+            delete_result = delete_student_from_all_devices(uid, device_manager)
+            print(f"🗑️ Deletion result: {delete_result['message']}")
+            
+            if delete_result["success"] or len(delete_result["deleted_from_devices"]) > 0:
+                print(f"🔄 Retrying enrollment after deletion...")
+                
+                # Retry enrollment after deletion
+                enrollment_result = enroll_fingerprint_multi_device(uid, f"{data.first_name}_{data.last_name}", device_manager)
+                
+                if enrollment_result["success"]:
+                    print(f"✅ Enrollment successful after deletion and retry!")
+                else:
+                    print(f"❌ Enrollment still failed after deletion and retry: {enrollment_result['error']}")
+            else:
+                print(f"❌ Failed to delete user from devices: {delete_result['message']}")
+    
+    # If still failed after potential retry, try single device fallback
     if not enrollment_result["success"]:
         # Multi-device enrollment failed, try single device fallback
         print(f"⚠️ Multi-device enrollment failed: {enrollment_result['error']}. Trying single device fallback.")
         template = enroll_fingerprint(uid, f"{data.first_name}_{data.last_name}")
         if not template:
+            # BOTH multi-device and single device enrollment failed
+            # DO NOT INCREMENT COUNTER - enrollment completely failed
+            final_error_msg = f"Fingerprint enrollment failed on all devices. Multi-device error: {enrollment_result['error']}. Please try again or check device connectivity."
+            print(f"❌ {final_error_msg}")
             raise HTTPException(
                 status_code=500, 
-                detail=f"Failed to enroll fingerprint on all devices. Multi-device error: {enrollment_result['error']}"
+                detail=final_error_msg
             )
+        # Single device fallback succeeded
         device_used = None
+        print(f"✅ Fingerprint enrolled successfully using single device fallback")
     else:
         template = enrollment_result["template"]
         device_used = enrollment_result["device_used"]
@@ -101,46 +157,80 @@ async def register_student_with_fingerprint(
             "fingerprint_template": template
         })
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{HOST_REMOTE_URL}/students/",
-                json=student_payload,
-                headers=headers
-            )
-
-        if response.status_code != 200:
-            raise HTTPException(status_code=500, detail=f"Main backend error: {response.text}")
-
-        created_student = response.json()
-        
-        # Store in local students collection
         try:
-            local_student = Student(
-                uid=uid,
-                student_id=str(student_id),
-                first_name=data.first_name,
-                last_name=data.last_name,
-                email=data.email,
-                phone_number=data.phone_number,
-                guardian_number=data.guardian_number,
-                birth_date=data.birth_date,
-                national_id=data.national_id,
-                gender=data.gender,
-                level=data.level,
-                school_name=data.school_name,
-                is_subscription=True,
-                fingerprint_template=template
-            )
-            await local_student.insert()
-            print(f"✅ Student {data.first_name} {data.last_name} stored in local database")
-        except Exception as e:
-            print(f"⚠️ Warning: Failed to store student in local database: {e}")
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    f"{HOST_REMOTE_URL}/students/",
+                    json=student_payload,
+                    headers=headers
+                )
 
-        return {
-            "message": "Student created successfully via fingerprint and stored locally",
-            "data": created_student
-        }
-    else:
+            if response.status_code != 200:
+                error_text = response.text
+                print(f"❌ Main backend error (status {response.status_code}): {error_text}")
+                
+                # Check if the error is due to blacklist
+                if "blacklist" in error_text.lower() or "same name" in error_text.lower():
+                    print(f"⚠️ Detected blacklist error. Attempting to delete student UID={uid} from all fingerprint devices...")
+                    
+                    # Delete the student from all fingerprint devices
+                    delete_result = delete_student_from_all_devices(uid, device_manager)
+                    print(f"🗑️ Fingerprint deletion result: {delete_result['message']}")
+                    
+                    # Enhance the error message to include deletion info
+                    enhanced_error = f"Student creation failed due to blacklist restriction. Student has been automatically removed from fingerprint devices. Original error: {error_text}"
+                    if delete_result["success"]:
+                        enhanced_error += f" Successfully deleted from {len(delete_result['deleted_from_devices'])} fingerprint devices."
+                    else:
+                        enhanced_error += f" Warning: Failed to delete from some fingerprint devices: {delete_result.get('failed_devices', [])}."
+                    
+                    raise HTTPException(status_code=response.status_code, detail=enhanced_error)
+                else:
+                    # Other main backend error
+                    raise HTTPException(status_code=500, detail=f"Main backend error: {error_text}")
+            
+            created_student = response.json()
+            
+            # INCREMENT COUNTER AFTER SUCCESSFUL CREATION (online mode)
+            # Since we successfully created the student, we can now safely increment the local counter
+            await increment_student_counter()
+            
+            # Store in local students collection
+            try:
+                local_student = Student(
+                    uid=uid,
+                    student_id=str(student_id),
+                    first_name=data.first_name,
+                    last_name=data.last_name,
+                    email=data.email,
+                    phone_number=data.phone_number,
+                    guardian_number=data.guardian_number,
+                    birth_date=data.birth_date,
+                    national_id=data.national_id,
+                    gender=data.gender,
+                    level=data.level,
+                    school_name=data.school_name,
+                    is_subscription=True,
+                    fingerprint_template=template
+                )
+                await local_student.insert()
+                print(f"✅ Student {data.first_name} {data.last_name} stored in local database")
+            except Exception as e:
+                print(f"⚠️ Warning: Failed to store student in local database: {e}")
+
+            return {
+                "message": "Student created successfully via fingerprint and stored locally",
+                "data": created_student
+            }
+            
+        except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.RequestError) as e:
+            print(f"⚠️ Connection timeout or error when creating student on main backend: {e}")
+            print("🔄 Falling back to offline mode...")
+            online = False
+            # Fall through to offline mode - create student locally and add to sync queue
+    
+    # OFFLINE MODE or FALLBACK MODE: Save to both students and missing_students collections
+    if not online:
         # OFFLINE MODE: Save to both students and missing_students collections
         try:
             # Save to regular students collection
@@ -182,6 +272,10 @@ async def register_student_with_fingerprint(
             )
             await missing_student.insert()
             print(f"✅ Student {data.first_name} {data.last_name} also stored in missing_students for later sync")
+            
+            # INCREMENT COUNTER AFTER SUCCESSFUL CREATION (offline mode)
+            # Since we successfully created the student locally, we can now safely increment the counter
+            await increment_student_counter()
 
         except Exception as e:
             print(f"❌ Failed to store student in databases: {e}")
@@ -242,6 +336,29 @@ async def delete_fingerprint(student_id: int):
         return {"message": "Fingerprint deleted, but failed to delete from local database"}
 
 
+@router.delete("/delete_from_all_devices/{uid}")
+async def delete_from_all_fingerprint_devices(uid: int):
+    """
+    Delete a student from all fingerprint devices.
+    Useful for fixing "user already exists" errors.
+    """
+    configure_network()
+    
+    print(f"🗑️ Attempting to delete UID={uid} from all fingerprint devices")
+    
+    # Use the multi-device deletion function
+    delete_result = delete_student_from_all_devices(uid, device_manager)
+    
+    return {
+        "uid": uid,
+        "success": delete_result["success"],
+        "message": delete_result["message"],
+        "deleted_from_devices": delete_result["deleted_from_devices"],
+        "failed_devices": delete_result.get("failed_devices", []),
+        "note": "This only deletes the fingerprint from devices, not from the database. Use the regular delete endpoint to remove from database as well."
+    }
+
+
 @router.post("/init-counter")
 async def init_counter(start_value: int = 10018):
     """
@@ -265,6 +382,75 @@ async def connectivity_status():
         "online": online,
         "status": "connected" if online else "offline",
         "remote_url": HOST_REMOTE_URL
+    }
+
+
+@router.get("/fingerprint-device-status")
+async def fingerprint_device_status():
+    """
+    Check fingerprint device connectivity and status.
+    Useful for troubleshooting enrollment timeouts.
+    """
+    from app.utils.fingerprint import connect_device
+    
+    # Test single device connection
+    single_device_status = {
+        "connected": False,
+        "error": None,
+        "device_info": None
+    }
+    
+    try:
+        conn = connect_device()
+        if conn:
+            try:
+                # Test basic device operations
+                users = conn.get_users()
+                user_count = len(users) if users else 0
+                
+                single_device_status = {
+                    "connected": True,
+                    "error": None,
+                    "device_info": {
+                        "ip": "192.168.1.201",
+                        "port": 4370,
+                        "user_count": user_count,
+                        "firmware_version": getattr(conn, 'firmware_version', 'Unknown'),
+                        "device_name": getattr(conn, 'device_name', 'Unknown')
+                    }
+                }
+                conn.disconnect()
+            except Exception as e:
+                single_device_status["error"] = f"Connected but device operations failed: {str(e)}"
+                try:
+                    conn.disconnect()
+                except:
+                    pass
+        else:
+            single_device_status["error"] = "Failed to connect to device"
+    except Exception as e:
+        single_device_status["error"] = f"Connection error: {str(e)}"
+    
+    # Test multi-device manager status
+    multi_device_status = device_manager.get_device_status()
+    
+    return {
+        "single_device": single_device_status,
+        "multi_device": multi_device_status,
+        "recommendations": {
+            "timeout_issues": [
+                "Ensure finger is properly placed on scanner during enrollment",
+                "Check if device is busy with another operation",
+                "Verify network connectivity to fingerprint device",
+                "Try enrolling again after a few seconds"
+            ],
+            "connection_issues": [
+                "Check device IP address and port",
+                "Ensure device is powered on and network accessible",
+                "Verify firewall settings allow connection to device port",
+                "Check network cable connections"
+            ]
+        }
     }
 
 

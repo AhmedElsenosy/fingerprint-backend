@@ -694,6 +694,474 @@ async def submit_exam_solution_with_scanner(
         # If you want to remove temp files on error, add cleanup logic here
 
 
+@router.post("/{exam_id}/submit-with-auto-feeder")
+async def submit_exam_solutions_with_auto_feeder(
+    exam_id: str,
+    scan_resolution: int = Form(300),     # Scanner resolution in DPI
+    scan_mode: str = Form("Color"),       # Scanner mode
+    max_sheets: int = Form(50),           # Maximum number of sheets to process
+    manual_student_ids: str = Form(None)  # Optional comma-separated fallback IDs
+):
+    """
+    Submit and automatically correct multiple student exam solutions using scanner's auto-feeder.
+    This endpoint connects to scanner, uses the automatic document feeder (ADF) to scan
+    multiple bubble sheets, and processes them for automatic correction in batch.
+    """
+    scanner = None
+    processed_results = []
+    temp_files_to_cleanup = []
+    
+    try:
+        # Step 1: Get exam details from main backend
+        async with httpx.AsyncClient() as client:
+            exam_response = await client.get(
+                f"{MAIN_BACKEND_URL}/internal/exams/{exam_id}",
+                timeout=30.0
+            )
+            
+            if exam_response.status_code != 200:
+                raise HTTPException(
+                    status_code=exam_response.status_code,
+                    detail=f"Failed to get exam details: {exam_response.text}"
+                )
+            
+            exam_data = exam_response.json()
+        
+        # Step 2: Parse manual student IDs if provided
+        manual_ids_list = []
+        if manual_student_ids:
+            manual_ids_list = [id.strip() for id in manual_student_ids.split(',') if id.strip()]
+            print(f"🆔 Manual student IDs provided: {manual_ids_list}")
+        
+        # Step 3: Connect to Scanner
+        print("📡 Connecting to scanner for auto-feeder operation...")
+        scanner = ScannerConnection()
+        
+        if not scanner.connect_scanner():
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to connect to scanner. Please ensure scanner is connected and powered on."
+            )
+        
+        scanner_info = scanner.get_scanner_info()
+        print(f"✅ Scanner connected: {scanner_info.get('name', 'Unknown')}")
+        
+        # Step 4: Auto-feeder processing loop
+        sheet_number = 0
+        successful_corrections = 0
+        failed_corrections = 0
+        
+        print(f"📄 Starting auto-feeder processing (max {max_sheets} sheets)...")
+        
+        while sheet_number < max_sheets:
+            sheet_number += 1
+            current_temp_path = None
+            
+            try:
+                print(f"\n📄 Processing sheet #{sheet_number}...")
+                
+                # Scan the next document from auto-feeder
+                timestamp = int(time.time())
+                temp_filename = f"autofeeder_{exam_id}_sheet{sheet_number}_{timestamp}.png"
+                current_temp_path = os.path.join(STUDENT_SOLUTION_DIR, temp_filename)
+                temp_files_to_cleanup.append(current_temp_path)
+                
+                print(f"📄 Scanning sheet #{sheet_number}...")
+                
+                # Scan the document from auto-feeder
+                success = scanner.scan_document(
+                    output_path=current_temp_path,
+                    resolution=scan_resolution,
+                    mode=scan_mode
+                )
+                
+                if not success:
+                    # Check if this is end of sheets or actual error
+                    print(f"⚠️ No more sheets detected or scan failed for sheet #{sheet_number}")
+                    if sheet_number == 1:
+                        # First sheet failed - this is an error
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Failed to scan first document. Please check scanner and paper placement."
+                        )
+                    else:
+                        # No more sheets - end of batch
+                        print(f"✅ Auto-feeder processing completed. No more sheets after #{sheet_number-1}")
+                        break
+                
+                print(f"✅ Sheet #{sheet_number} scanned successfully: {current_temp_path}")
+                
+                # Step 5: Process individual sheet (same logic as scanner endpoint)
+                sheet_result = await process_single_sheet(
+                    exam_id=exam_id,
+                    exam_data=exam_data,
+                    sheet_path=current_temp_path,
+                    sheet_number=sheet_number,
+                    manual_student_id=manual_ids_list[sheet_number-1] if sheet_number-1 < len(manual_ids_list) else None
+                )
+                
+                processed_results.append(sheet_result)
+                
+                if sheet_result["status"] == "success":
+                    successful_corrections += 1
+                    print(f"✅ Sheet #{sheet_number}: {sheet_result['student_name']} - {sheet_result['degree']}/{sheet_result['final_degree']}")
+                else:
+                    failed_corrections += 1
+                    print(f"❌ Sheet #{sheet_number}: {sheet_result['error']}")
+                
+            except Exception as e:
+                # Individual sheet processing failed
+                failed_corrections += 1
+                error_result = {
+                    "sheet_number": sheet_number,
+                    "status": "failed",
+                    "error": f"Sheet processing error: {str(e)}",
+                    "solution_path": current_temp_path if current_temp_path else None
+                }
+                processed_results.append(error_result)
+                print(f"❌ Sheet #{sheet_number} failed: {str(e)}")
+                
+                # Continue with next sheet
+                continue
+        
+        # Step 6: Prepare final response
+        total_processed = successful_corrections + failed_corrections
+        
+        if total_processed == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="No sheets were processed. Please ensure sheets are properly loaded in the auto-feeder."
+            )
+        
+        completion_message = f"Auto-feeder processing completed. Processed {total_processed} sheets: {successful_corrections} successful, {failed_corrections} failed"
+        
+        return {
+            "message": completion_message,
+            "total_sheets_processed": total_processed,
+            "successful_corrections": successful_corrections,
+            "failed_corrections": failed_corrections,
+            "scanner_info": scanner_info,
+            "scan_settings": {
+                "resolution": scan_resolution,
+                "mode": scan_mode,
+                "max_sheets": max_sheets
+            },
+            "results": processed_results
+        }
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error during auto-feeder exam correction: {str(e)}"
+        )
+    finally:
+        # Cleanup: disconnect scanner
+        if scanner:
+            try:
+                scanner.disconnect()
+                print("📡 Scanner disconnected")
+            except:
+                pass
+        
+        # Note: We keep successful scanned files for record-keeping
+        # Clean up only failed temp files
+        for temp_file in temp_files_to_cleanup:
+            if temp_file and os.path.exists(temp_file):
+                # Check if this file was successfully processed
+                file_kept = any(
+                    result.get("status") == "success" and result.get("solution_path") == temp_file 
+                    for result in processed_results
+                )
+                if not file_kept:
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
+
+
+async def process_single_sheet(exam_id: str, exam_data: dict, sheet_path: str, sheet_number: int, manual_student_id: str = None):
+    """
+    Process a single scanned sheet through the complete correction pipeline.
+    Returns a result dictionary with student info and correction results.
+    """
+    try:
+        # Step 1: Detect student ID from scanned bubble sheet
+        detected_student_id = None
+        id_confidence = 0.0
+        id_detection = {}
+        
+        if manual_student_id:
+            # Use manual ID if provided
+            detected_student_id = manual_student_id.strip()
+            id_confidence = 1.0
+            id_detection = {
+                "student_id": detected_student_id,
+                "confidence": 1.0,
+                "message": "Manual student ID used",
+                "debug_info": {"method": "manual_override"}
+            }
+            print(f"🆔 Sheet #{sheet_number}: Using manual student ID: {detected_student_id}")
+        else:
+            # Auto-detect using bubble_sheet_processor
+            print(f"🔍 Sheet #{sheet_number}: Auto-detecting student ID...")
+            try:
+                import cv2
+                image = cv2.imread(sheet_path)
+                if image is None:
+                    raise ValueError("Could not load scanned image for processing")
+                
+                bubble_result = process_bubble_sheet(
+                    image, 
+                    reference_data_file='BubbleSheetCorrecterModule/reference_data.json',
+                    id_reference_file='BubbleSheetCorrecterModule/id_coordinates.json'
+                )
+                
+                if bubble_result['success'] and bubble_result['results']:
+                    grade_data = bubble_result['results']['grade_data']
+                    
+                    if 'id' in grade_data:
+                        id_data = grade_data['id']
+                        detected_student_id = id_data['value']
+                        id_confidence = 1.0 if id_data['is_complete'] else 0.5
+                        id_detection = {
+                            "student_id": detected_student_id,
+                            "confidence": id_confidence,
+                            "message": "Detected using bubble_sheet_processor",
+                            "debug_info": {
+                                "method": "bubble_sheet_processor", 
+                                "is_complete": id_data['is_complete'],
+                                "raw_value": id_data['value']
+                            }
+                        }
+                        print(f"🆔 Sheet #{sheet_number}: Detected ID: {detected_student_id} (complete: {id_data['is_complete']})")
+                    else:
+                        raise ValueError("No ID section found in bubble sheet results")
+                else:
+                    raise ValueError(f"Bubble sheet processing failed: {bubble_result.get('message', 'Unknown error')}")
+                    
+            except Exception as e:
+                raise ValueError(f"Student ID detection failed: {str(e)}")
+        
+        # Validate student ID
+        if not detected_student_id or len(detected_student_id.strip()) == 0:
+            raise ValueError("Invalid student ID detected: empty or null value")
+        
+        detected_student_id = detected_student_id.strip()
+        
+        if len(detected_student_id) == 0 or len(detected_student_id) > 20:
+            raise ValueError(f"Invalid student ID format: '{detected_student_id}' (length: {len(detected_student_id)}). Must be 1-20 characters.")
+        
+        if (detected_student_id == "0" or 
+            (len(detected_student_id) == 1 and detected_student_id.isdigit()) or
+            (len(detected_student_id) == 2 and detected_student_id in ["00", "11", "22", "33", "44", "55", "66", "77", "88", "99"]) or
+            len(detected_student_id) < 3):
+            raise ValueError(f"Invalid student ID detected: '{detected_student_id}' appears to be incorrect")
+        
+        # Step 2: Student lookup to get name and ObjectId
+        print(f"🔍 Sheet #{sheet_number}: Looking up student {detected_student_id}...")
+        try:
+            student_numeric_id = int(detected_student_id)
+            
+            async with httpx.AsyncClient() as client:
+                student_lookup_response = await client.get(
+                    f"{MAIN_BACKEND_URL}/internal/students/by-student-id/{student_numeric_id}",
+                    timeout=30.0
+                )
+                
+                if student_lookup_response.status_code == 200:
+                    student_info = student_lookup_response.json()
+                    student_object_id = student_info.get("_id")
+                    student_first_name = student_info.get("first_name", "")
+                    student_last_name = student_info.get("last_name", "")
+                    student_full_name = f"{student_first_name} {student_last_name}".strip()
+                    
+                    print(f"✅ Sheet #{sheet_number}: Found student: {student_full_name} (ObjectId: {student_object_id})")
+                    backend_student_id = student_object_id
+                elif student_lookup_response.status_code == 404:
+                    raise ValueError(f"Student with ID {detected_student_id} not found in database")
+                else:
+                    raise ValueError(f"Failed to lookup student: {student_lookup_response.text}")
+        except ValueError as ve:
+            if "not found" in str(ve) or "Failed to lookup" in str(ve):
+                raise ve
+            else:
+                raise ValueError(f"Invalid student ID format: '{detected_student_id}' must be a numeric value")
+        
+        # Step 3: Rename file with detected student ID
+        timestamp = int(time.time())
+        final_filename = f"autofeeder_{detected_student_id}_{exam_id}_sheet{sheet_number}_{timestamp}.png"
+        final_solution_path = os.path.join(STUDENT_SOLUTION_DIR, final_filename)
+        
+        os.rename(sheet_path, final_solution_path)
+        
+        # Step 4: Detect exam model and perform correction (same logic as scanner endpoint)
+        print(f"🔍 Sheet #{sheet_number}: Detecting exam model...")
+        detected_model = None
+        model_confidence = 0.0
+        
+        try:
+            import cv2
+            image = cv2.imread(final_solution_path)
+            if image is None:
+                raise ValueError("Could not load image for model detection")
+            
+            bubble_result = process_bubble_sheet(
+                image, 
+                reference_data_file='BubbleSheetCorrecterModule/reference_data.json',
+                id_reference_file='BubbleSheetCorrecterModule/id_coordinates.json',
+                exam_models_file='BubbleSheetCorrecterModule/exam_models.json',
+                exam_model_key='exam_model_aruco'
+            )
+            
+            if bubble_result['success'] and bubble_result['results']:
+                grade_data = bubble_result['results']['grade_data']
+                
+                if 'exam_model' in grade_data:
+                    model_data = grade_data['exam_model']
+                    detected_model = model_data['value']
+                    model_confidence = 1.0 if model_data['is_valid'] else 0.5
+                    print(f"📝 Sheet #{sheet_number}: Detected model: {detected_model} (valid: {model_data['is_valid']})")
+                    
+        except Exception as e:
+            print(f"⚠️ Sheet #{sheet_number}: Model detection failed: {str(e)}")
+        
+        # Step 5: Find correct solution (same logic as scanner endpoint)
+        exam_models = exam_data.get("models", [])
+        legacy_solution = exam_data.get("solution_photo")
+        selected_model = None
+        exam_solution_path = None
+        
+        if not detected_model or detected_model == "None" or str(detected_model).strip() == "":
+            if legacy_solution:
+                exam_solution_path = legacy_solution
+                selected_model = {"model_name": "Legacy Model (Auto-Feeder)", "model_number": "legacy"}
+                detected_model = "legacy"
+            elif exam_models and any(model.get("solution_photo") for model in exam_models):
+                for model in exam_models:
+                    if model.get("solution_photo"):
+                        selected_model = model
+                        detected_model = model.get("model_number", 1)
+                        exam_solution_path = selected_model.get("solution_photo")
+                        break
+            else:
+                raise ValueError("Model detection failed and no fallback solutions available")
+        else:
+            # Find matching model
+            for model in exam_models:
+                if str(model.get("model_number")).upper() == str(detected_model).upper():
+                    selected_model = model
+                    break
+            
+            if not selected_model and str(detected_model).isalpha() and len(str(detected_model)) == 1:
+                model_number_from_letter = ord(str(detected_model).upper()) - ord('A') + 1
+                for model in exam_models:
+                    if model.get("model_number") == model_number_from_letter:
+                        selected_model = model
+                        break
+            
+            if not selected_model and str(detected_model).isdigit():
+                try:
+                    model_letter_from_number = chr(int(detected_model) - 1 + ord('A'))
+                    for model in exam_models:
+                        if str(model.get("model_number")).upper() == model_letter_from_number:
+                            selected_model = model
+                            break
+                except:
+                    pass
+            
+            if not selected_model:
+                if legacy_solution:
+                    exam_solution_path = legacy_solution
+                    selected_model = {"model_name": "Legacy Fallback", "model_number": "legacy"}
+                    detected_model = "legacy"
+                elif exam_models and any(model.get("solution_photo") for model in exam_models):
+                    for model in exam_models:
+                        if model.get("solution_photo"):
+                            selected_model = model
+                            detected_model = model.get("model_number", 1)
+                            break
+                else:
+                    raise ValueError(f"No matching solution found for model '{detected_model}'")
+            
+            if selected_model and not exam_solution_path:
+                exam_solution_path = selected_model.get("solution_photo")
+        
+        # Step 6: Resolve solution path
+        possible_paths = [
+            exam_solution_path,
+            os.path.join("/home/ahmed/Desktop/teacher/venv/src", exam_solution_path),
+            os.path.join("..", "..", "venv", "src", exam_solution_path),
+        ]
+        
+        resolved_exam_path = None
+        for path in possible_paths:
+            if os.path.exists(path) and os.path.isfile(path):
+                resolved_exam_path = path
+                break
+        
+        if not resolved_exam_path:
+            raise ValueError(f"Exam answer key file not found")
+        
+        # Step 7: Perform correction
+        correction_result = correct_student_exam(
+            student_solution_path=final_solution_path,
+            exam_solution_path=resolved_exam_path,
+            final_degree=exam_data["final_degree"]
+        )
+        
+        if not correction_result["success"]:
+            raise ValueError(f"Correction failed: {correction_result['message']}")
+        
+        # Step 8: Save results to backend
+        student_degree = correction_result["student_score"]
+        degree_percentage = correction_result["percentage"]
+        
+        result_data = {
+            "student_id": backend_student_id,
+            "degree": student_degree,
+            "percentage": degree_percentage,
+            "delivery_time": datetime.utcnow().isoformat(),
+            "solution_photo": final_solution_path,
+            "correction_details": correction_result
+        }
+        
+        async with httpx.AsyncClient() as client:
+            result_response = await client.post(
+                f"{MAIN_BACKEND_URL}/internal/exams/{exam_id}/results",
+                json=result_data,
+                timeout=30.0
+            )
+            
+            if result_response.status_code != 200:
+                raise ValueError(f"Failed to save results: {result_response.text}")
+        
+        # Step 9: Return success result
+        return {
+            "sheet_number": sheet_number,
+            "student_id": detected_student_id,
+            "student_name": student_full_name,
+            "degree": student_degree,
+            "final_degree": exam_data["final_degree"],
+            "percentage": degree_percentage,
+            "status": "success",
+            "solution_path": final_solution_path,
+            "detected_model": detected_model,
+            "model_name": selected_model.get("model_name") if selected_model else "Legacy Model"
+        }
+        
+    except Exception as e:
+        # Return error result
+        return {
+            "sheet_number": sheet_number,
+            "status": "failed",
+            "error": str(e),
+            "solution_path": sheet_path if os.path.exists(sheet_path) else None
+        }
+
+
 @router.post("/{exam_id}/submit")
 async def submit_exam_solution(
     exam_id: str,

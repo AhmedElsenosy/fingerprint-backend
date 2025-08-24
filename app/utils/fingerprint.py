@@ -39,15 +39,34 @@ def enroll_fingerprint(uid: int, name: str):
         )
 
         # Enroll user — some devices may expect only uid and finger_id
+        enrollment_success = False
         try:
+            print(f"🔍 Attempting fingerprint enrollment (3 args) for UID {uid}...")
             conn.enroll_user(uid, 0, 0)  # If this raises, try conn.enroll_user(uid, 0)
+            enrollment_success = True
+            print(f"✅ Fingerprint enrollment (3 args) successful")
         except Exception as enroll_err:
-            print(f"⚠️ enroll_user with 3 args failed: {enroll_err}. Trying with 2 args...")
+            error_msg = str(enroll_err).lower()
+            if "timed out" in error_msg or "timeout" in error_msg:
+                print(f"⚠️ Fingerprint enrollment timed out. This usually means no finger was placed or device is busy.")
+            else:
+                print(f"⚠️ enroll_user with 3 args failed: {enroll_err}")
+            
             try:
+                print(f"🔍 Attempting fingerprint enrollment (2 args) for UID {uid}...")
                 conn.enroll_user(uid, 0)
+                enrollment_success = True
+                print(f"✅ Fingerprint enrollment (2 args) successful")
             except Exception as fallback_err:
-                print(f"❌ Both enrollment attempts failed: {fallback_err}")
+                fallback_error_msg = str(fallback_err).lower()
+                if "timed out" in fallback_error_msg or "timeout" in fallback_error_msg:
+                    print(f"❌ Both enrollment attempts timed out. Please ensure finger is placed on scanner and try again.")
+                else:
+                    print(f"❌ Both enrollment attempts failed: {fallback_err}")
                 return None
+        
+        if not enrollment_success:
+            return None
 
         # Get fingerprint template
         template = conn.get_user_template(uid, 0)

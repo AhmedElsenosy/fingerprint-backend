@@ -1,26 +1,50 @@
 [
     {
-        "device_id": "main_entrance",
+        "device_id": "boy1",
         "ip": "192.168.1.201",
         "port": 4370,
-        "name": "Main Entrance",
-        "location": "Building A",
+        "name": "boy1",
+        "location": "Attendance Zone",
         "enabled": true
     },
     {
-        "device_id": "lab_entrance",
+        "device_id": "boy2",
         "ip": "192.168.1.202",
         "port": 4370,
-        "name": "Lab Entrance",
-        "location": "Building B",
+        "name": "boy2",
+        "location": "Attendance Zone",
         "enabled": true
     },
     {
-        "device_id": "library_entrance",
+        "device_id": "boy3",
         "ip": "192.168.1.203",
         "port": 4370,
-        "name": "Library Entrance",
-        "location": "Building C",
+        "name": "boy3",
+        "location": "Attendance Zone",
+        "enabled": true
+    },
+    {
+        "device_id": "girl1",
+        "ip": "192.168.1.204",
+        "port": 4370,
+        "name": "girl1",
+        "location": "Attendance Zone",
+        "enabled": true
+    },
+    {
+        "device_id": "girl2",
+        "ip": "192.168.1.205",
+        "port": 4370,
+        "name": "girl2",
+        "location": "Attendance Zone",
+        "enabled": true
+    },
+    {
+        "device_id": "girl3",
+        "ip": "192.168.1.206",
+        "port": 4370,
+        "name": "girl3",
+        "location": "Attendance Zone",
         "enabled": true
     }
 ]

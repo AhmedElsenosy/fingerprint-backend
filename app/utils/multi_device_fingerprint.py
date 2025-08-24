@@ -167,7 +167,7 @@ class MultiDeviceManager:
         return status
     
     async def start_all_capture_tasks(self, capture_function):
-        """Start capture tasks for all enabled and connected devices"""
+        """Start capture tasks for all enabled and connected devices (flexible: works with 1-6 devices)"""
         if self.is_running:
             print("⚠️ Capture tasks already running")
             return {"success": False, "message": "Already running"}
@@ -186,7 +186,7 @@ class MultiDeviceManager:
         if not connected_devices:
             return {"success": False, "message": "No devices connected successfully"}
         
-        # Start capture tasks for connected devices
+        # Start capture tasks for connected devices (flexible: accept any number >= 1)
         self.capture_tasks = {}
         self.is_running = True
         
@@ -195,13 +195,21 @@ class MultiDeviceManager:
             task = asyncio.create_task(capture_function(device))
             self.capture_tasks[device.device_id] = task
         
-        print(f"✅ Started capture on {len(connected_devices)} devices")
+        total_enabled = len(enabled_devices)
+        connected_count = len(connected_devices)
+        
+        print(f"✅ Started multi-device capture on {connected_count}/{total_enabled} devices")
+        if connected_count < total_enabled:
+            failed_devices = [device.name for device in enabled_devices if not connection_results.get(device.device_id, False)]
+            print(f"⚠️ Could not connect to: {', '.join(failed_devices)}")
         
         return {
             "success": True,
-            "message": f"Started attendance on {len(connected_devices)} devices",
+            "message": f"Multi-device attendance started on {connected_count}/{total_enabled} devices",
             "devices_started": [device.name for device in connected_devices],
-            "total_devices": len(connected_devices)
+            "devices_failed": [device.name for device in enabled_devices if not connection_results.get(device.device_id, False)],
+            "total_devices": connected_count,
+            "total_configured": total_enabled
         }
     
     async def stop_all_capture_tasks(self):
@@ -266,12 +274,39 @@ def enroll_fingerprint_multi_device(uid: int, name: str, device_manager: MultiDe
             print(f"🔍 Enrolling fingerprint for UID={uid}, Name={name} on device {device.name}")
             conn.disable_device()
 
-            # Delete user if exists
-            users = conn.get_users()
-            user_exists = any(u.uid == uid for u in users)
-            if user_exists:
-                print(f"⚠️ User with UID={uid} already exists on {device.name}. Deleting first.")
-                conn.delete_user(uid=uid)
+            # Delete user if exists (with enhanced error handling)
+            try:
+                users = conn.get_users()
+                user_exists = any(u.uid == uid for u in users)
+                if user_exists:
+                    print(f"⚠️ User with UID={uid} already exists on {device.name}. Deleting first.")
+                    conn.delete_user(uid=uid)
+                    print(f"✅ Successfully deleted existing user UID={uid} from {device.name}")
+                    
+                    # Verify deletion was successful
+                    users_after = conn.get_users()
+                    still_exists = any(u.uid == uid for u in users_after)
+                    if still_exists:
+                        print(f"⚠️ User UID={uid} still exists after deletion attempt on {device.name}")
+                        # Try deletion one more time with force
+                        try:
+                            conn.delete_user(uid=uid)
+                            print(f"🔄 Forced deletion of UID={uid} from {device.name}")
+                        except Exception as force_delete_err:
+                            print(f"❌ Force deletion failed for UID={uid} on {device.name}: {force_delete_err}")
+                            continue  # Skip to next device
+                    else:
+                        print(f"✅ Verified deletion of UID={uid} from {device.name}")
+            except Exception as delete_err:
+                print(f"⚠️ Error during user deletion check on {device.name}: {delete_err}")
+                # Try to delete anyway in case the user exists but get_users failed
+                try:
+                    conn.delete_user(uid=uid)
+                    print(f"✅ Forced deletion attempt for UID={uid} on {device.name}")
+                except Exception as force_err:
+                    if "not found" not in str(force_err).lower():
+                        print(f"❌ Failed to force delete UID={uid} from {device.name}: {force_err}")
+                        continue  # Skip to next device
 
             # Set user on the device
             conn.set_user(
@@ -283,16 +318,35 @@ def enroll_fingerprint_multi_device(uid: int, name: str, device_manager: MultiDe
                 user_id=str(uid)
             )
 
-            # Enroll user
+            # Enroll user with improved error messages
+            enrollment_success = False
             try:
+                print(f"🔍 Attempting fingerprint enrollment (3 args) for UID {uid} on {device.name}...")
                 conn.enroll_user(uid, 0, 0)
+                enrollment_success = True
+                print(f"✅ Fingerprint enrollment (3 args) successful on {device.name}")
             except Exception as enroll_err:
-                print(f"⚠️ enroll_user with 3 args failed: {enroll_err}. Trying with 2 args...")
+                error_msg = str(enroll_err).lower()
+                if "timed out" in error_msg or "timeout" in error_msg:
+                    print(f"⚠️ Fingerprint enrollment timed out on {device.name}. This usually means no finger was placed or device is busy.")
+                else:
+                    print(f"⚠️ enroll_user with 3 args failed on {device.name}: {enroll_err}")
+                
                 try:
+                    print(f"🔍 Attempting fingerprint enrollment (2 args) for UID {uid} on {device.name}...")
                     conn.enroll_user(uid, 0)
+                    enrollment_success = True
+                    print(f"✅ Fingerprint enrollment (2 args) successful on {device.name}")
                 except Exception as fallback_err:
-                    print(f"❌ Both enrollment attempts failed: {fallback_err}")
+                    fallback_error_msg = str(fallback_err).lower()
+                    if "timed out" in fallback_error_msg or "timeout" in fallback_error_msg:
+                        print(f"❌ Both enrollment attempts timed out on {device.name}. Please ensure finger is placed on scanner and try again.")
+                    else:
+                        print(f"❌ Both enrollment attempts failed on {device.name}: {fallback_err}")
                     continue
+            
+            if not enrollment_success:
+                continue
 
             # Get fingerprint template
             template = conn.get_user_template(uid, 0)
@@ -343,6 +397,71 @@ def enroll_fingerprint_multi_device(uid: int, name: str, device_manager: MultiDe
         "error": "Failed to enroll on any available device",
         "template": None,
         "device_used": None
+    }
+
+
+def delete_student_from_all_devices(uid: int, device_manager: MultiDeviceManager) -> Dict[str, Any]:
+    """
+    Delete a student from all available fingerprint devices
+    Returns a dict with success status and details
+    """
+    enabled_devices = device_manager.get_enabled_devices()
+    
+    if not enabled_devices:
+        return {
+            "success": False,
+            "error": "No enabled devices available",
+            "deleted_from_devices": []
+        }
+    
+    deleted_from_devices = []
+    failed_devices = []
+    
+    # Try to delete from each device
+    for device in enabled_devices:
+        conn = device_manager.connect_device(device)
+        if not conn:
+            failed_devices.append({"device": device.name, "error": "Connection failed"})
+            continue
+            
+        try:
+            print(f"🗑️ Attempting to delete UID={uid} from device {device.name}")
+            
+            # Check if user exists first
+            users = conn.get_users()
+            user_exists = any(u.uid == uid for u in users)
+            
+            if user_exists:
+                conn.delete_user(uid=uid)
+                deleted_from_devices.append(device.name)
+                print(f"✅ Successfully deleted UID={uid} from device {device.name}")
+            else:
+                print(f"ℹ️ UID={uid} not found on device {device.name} (already deleted or never existed)")
+                deleted_from_devices.append(f"{device.name} (not found)")
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "not found" in error_msg or "no such user" in error_msg:
+                print(f"ℹ️ UID={uid} not found on device {device.name} (already deleted)")
+                deleted_from_devices.append(f"{device.name} (not found)")
+            else:
+                print(f"❌ Failed to delete UID={uid} from device {device.name}: {e}")
+                failed_devices.append({"device": device.name, "error": str(e)})
+        
+        finally:
+            try:
+                device_manager.disconnect_device(device)
+            except:
+                pass
+    
+    success = len(failed_devices) == 0
+    message = f"Deleted from {len(deleted_from_devices)} devices" if success else f"Partial success: deleted from {len(deleted_from_devices)} devices, failed on {len(failed_devices)}"
+    
+    return {
+        "success": success,
+        "message": message,
+        "deleted_from_devices": deleted_from_devices,
+        "failed_devices": failed_devices
     }
 
 

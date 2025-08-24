@@ -39,6 +39,69 @@ async def get_next_student_id_offline():
         }
 
 
+async def peek_next_student_id_offline():
+    """
+    Get the next student UID and student_id from local counter WITHOUT incrementing.
+    This is used when we want to reserve IDs but only increment after successful creation.
+    
+    Returns:
+        dict: Dictionary containing uid and student_id
+    """
+    try:
+        # Look for our main student counter
+        counter = await Counter.find_one(Counter.name == "student_sequence")
+        
+        if not counter:
+            # Initialize counter starting from 10019 (next after your last UID 10018)
+            counter = Counter(name="student_sequence", value=10018)  # Start from 10018, so next is 10019
+            await counter.insert()
+        
+        # Get next ID without incrementing
+        next_id = counter.value + 1
+        
+        return {
+            "uid": next_id,
+            "student_id": str(next_id)  # Convert to string for student_id
+        }
+        
+    except Exception as e:
+        # Fallback: if counter fails, start from a safe number
+        import time
+        fallback_id = int(time.time()) % 100000 + 20000  # Start from 20000+ range
+        return {
+            "uid": fallback_id,
+            "student_id": str(fallback_id)
+        }
+
+
+async def increment_student_counter():
+    """
+    Increment the student counter after successful student creation.
+    This should be called only after the student has been successfully created.
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        counter = await Counter.find_one(Counter.name == "student_sequence")
+        
+        if not counter:
+            # Initialize counter starting from 10019
+            counter = Counter(name="student_sequence", value=10019)
+            await counter.insert()
+        else:
+            # Increment the counter
+            counter.value += 1
+            await counter.save()
+        
+        print(f"✅ Student counter incremented to {counter.value}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Failed to increment student counter: {e}")
+        return False
+
+
 async def sync_local_counter_with_remote(remote_uid: int):
     """
     Update local counter to match the UID received from remote backend.
