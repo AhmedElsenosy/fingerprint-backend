@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Query, Depends, Request
 from pydantic import BaseModel
 from app.utils.fingerprint import connect_device
+from app.dependencies.auth import get_current_assistant
 from app.utils.multi_device_fingerprint import device_manager, DeviceInfo
 from datetime import datetime, date
 import subprocess
@@ -53,6 +54,12 @@ manager = ConnectionManager()
 # Store pending attendance decisions
 pending_decisions: Dict[str, Dict] = {}
 
+# Store active groups for current attendance session
+active_groups: List[Dict] = []
+
+# Store current auth token for device capture functions
+current_auth_token: str = None
+
 load_dotenv()
 HOST_REMOTE_URL = os.getenv("HOST_REMOTE_URL")
 
@@ -73,17 +80,20 @@ def configure_network():
         )
     subprocess.run(["sudo", "ip", "link", "set", "enx00e04c361694", "up"], check=True)
 
-
-async def send_attendance_to_server(uid: int, timestamp: str):
+async def send_attendance_to_server(uid: int, timestamp: str, request: Request = None):
     """Send attendance to main backend for validation and storage"""
     try:
+        token = request.headers.get("authorization") if request else None
+        headers = {"Authorization": token} if token else {}
+        
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{HOST_REMOTE_URL}/attendance/",
                 json={
                     "uid": uid,
                     "timestamp": timestamp
-                }
+                },
+                headers=headers
             )
             if response.status_code == 200:
                 return {"success": True, "data": response.json()}
@@ -92,9 +102,12 @@ async def send_attendance_to_server(uid: int, timestamp: str):
     except httpx.HTTPError as e:
         return {"success": False, "error": str(e), "status_code": 500}
 
-async def send_attendance_to_server_approved(uid: int, timestamp: str):
+async def send_attendance_to_server_approved(uid: int, timestamp: str, request: Request = None):
     """Send assistant-approved attendance to main backend (bypasses schedule validation)"""
     try:
+        token = request.headers.get("authorization") if request else None
+        headers = {"Authorization": token} if token else {}
+        
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{HOST_REMOTE_URL}/attendance/",
@@ -102,7 +115,8 @@ async def send_attendance_to_server_approved(uid: int, timestamp: str):
                     "uid": uid,
                     "timestamp": timestamp,
                     "assistant_approved": True  # This bypasses schedule validation
-                }
+                },
+                headers=headers
             )
             if response.status_code == 200:
                 return {"success": True, "data": response.json()}
@@ -110,6 +124,110 @@ async def send_attendance_to_server_approved(uid: int, timestamp: str):
                 return {"success": False, "error": response.text, "status_code": response.status_code}
     except httpx.HTTPError as e:
         return {"success": False, "error": str(e), "status_code": 500}
+
+async def get_active_groups_from_backend(request: Request = None):
+    """Get active groups from main backend based on current schedule"""
+    try:
+        token = request.headers.get("authorization") if request else None
+        headers = {"Authorization": token} if token else {}
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{HOST_REMOTE_URL}/group-schedule/active-groups", headers=headers)
+            if response.status_code == 200:
+                return {"success": True, "data": response.json()}
+            else:
+                return {"success": False, "error": response.text, "status_code": response.status_code}
+    except httpx.HTTPError as e:
+        return {"success": False, "error": str(e), "status_code": 500}
+
+async def send_absent_to_backend(uid: int, timestamp: str, request: Request = None):
+    """Send absent attendance record to main backend"""
+    try:
+        token = request.headers.get("authorization") if request else None
+        headers = {"Authorization": token} if token else {}
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{HOST_REMOTE_URL}/attendance/",
+                json={
+                    "uid": uid,
+                    "timestamp": timestamp,
+                    "is_absent": True,  # Mark as absent
+                    "marked_by_system": True  # Indicate this was automatically marked
+                },
+                headers=headers
+            )
+            if response.status_code == 200:
+                return {"success": True, "data": response.json()}
+            else:
+                return {"success": False, "error": response.text, "status_code": response.status_code}
+    except httpx.HTTPError as e:
+        return {"success": False, "error": str(e), "status_code": 500}
+
+async def mark_absent_students(active_group_levels: List[int], date_key: str):
+    """Mark absent all students from active groups who didn't attend today"""
+    absent_count = 0
+    backend_sent_count = 0
+    
+    try:
+        # For each active group level
+        for level in active_group_levels:
+            print(f"📋 Processing absent marking for level {level}...")
+            
+            # Find all students in this level/group
+            students_in_group = await Student.find(Student.level == level).to_list()
+            
+            for student in students_in_group:
+                # Check if student has attendance for today
+                if not hasattr(student, "attendance") or not isinstance(student.attendance, dict):
+                    student.attendance = {}
+                
+                # Check if student already has attendance for today (present or absent)
+                if date_key not in student.attendance:
+                    # Student didn't attend - mark as absent locally
+                    student.attendance[date_key] = False
+                    await student.save()
+                    absent_count += 1
+                    print(f"❌ Marked absent locally: {student.first_name} {student.last_name} (Level {level})")
+                    
+                    # Also send absent record to main backend
+                    try:
+                        # Create timestamp for the absent record (end of attendance session)
+                        now_cairo = datetime.now(pytz.timezone("Africa/Cairo"))
+                        absent_timestamp = now_cairo.isoformat()
+                        
+                        # Send absent record to backend with global auth token
+                        # Create mock request with global auth token
+                        class MockRequest:
+                            def __init__(self, token):
+                                self.headers = {"authorization": token} if token else {}
+                        
+                        mock_request = MockRequest(current_auth_token) if current_auth_token else None
+                        backend_result = await send_absent_to_backend(student.uid, absent_timestamp, mock_request)
+                        
+                        if backend_result["success"]:
+                            backend_sent_count += 1
+                            print(f"✅ Sent absent to backend: {student.first_name} {student.last_name} (UID: {student.uid})")
+                        else:
+                            print(f"⚠️ Failed to send absent to backend for {student.first_name} {student.last_name}: {backend_result.get('error', 'Unknown error')}")
+                            
+                    except Exception as backend_error:
+                        print(f"⚠️ Error sending absent to backend for {student.first_name} {student.last_name}: {str(backend_error)}")
+        
+        return {
+            "success": True, 
+            "absent_count": absent_count,
+            "backend_sent_count": backend_sent_count
+        }
+        
+    except Exception as e:
+        print(f"❌ Error marking absent students: {e}")
+        return {
+            "success": False, 
+            "error": str(e), 
+            "absent_count": absent_count,
+            "backend_sent_count": backend_sent_count
+        }
 
 async def capture_from_device(device: DeviceInfo):
     """Capture fingerprints from a specific device"""
@@ -148,8 +266,15 @@ async def capture_from_device(device: DeviceInfo):
                     student = await Student.find_one(Student.uid == attendance.uid)
                     student_name = f"{student.first_name} {student.last_name}" if student else "Unknown Student"
                     
-                    # First, validate through main backend BEFORE broadcasting anything
-                    validation_result = await send_attendance_to_server(attendance.uid, now_cairo.isoformat())
+                    # First, validate through main backend BEFORE broadcasting anything  
+                    # Use global auth token since capture_from_device doesn't have direct access to request
+                    # Create a mock request object with the auth token
+                    class MockRequest:
+                        def __init__(self, token):
+                            self.headers = {"authorization": token} if token else {}
+                    
+                    mock_request = MockRequest(current_auth_token) if current_auth_token else None
+                    validation_result = await send_attendance_to_server(attendance.uid, now_cairo.isoformat(), mock_request)
                     
                     if validation_result["success"]:
                         # Main backend approved - now save locally
@@ -215,12 +340,13 @@ async def capture_from_device(device: DeviceInfo):
                         # PRE-CHECK: Verify student exists and has group assignment
                         print(f"🔍 PRE-CHECK: Verifying student eligibility for pending decision...")
                         
-                        # SPECIAL CHECK 1: Auto-reject if backend says "Student not found" (404)
-                        if (status_code == 404 or "Student not found" in str(error_msg)):
-                            print(f"❌ AUTO-REJECT: Backend returned 'Student not found' - no pending decision needed")
+                        # SPECIAL CHECK 1: Auto-reject ONLY if backend says "Student not found" (404)
+                        if status_code == 404 or "Student not found" in str(error_msg):
+                            rejection_reason = "Student not found in main backend"
+                            print(f"❌ AUTO-REJECT: Backend returned '{rejection_reason}' - no pending decision needed")
                             # Auto reject - no pending decision
                             await manager.broadcast(
-                                f"❌ AUTO-REJECTED: Student {student_name} (UID={attendance.uid}) not found in main backend (Device: {device.name}, Location: {device.location})"
+                                f"❌ AUTO-REJECTED: Student {student_name} (UID={attendance.uid}) {rejection_reason.lower()} (Device: {device.name}, Location: {device.location})"
                             )
                             
                             # Also broadcast rejection via Socket.IO
@@ -240,12 +366,71 @@ async def capture_from_device(device: DeviceInfo):
                                 "timestamp": now_cairo.isoformat(),
                                 "is_correct_group": False,
                                 "requires_approval": False,
-                                "error_reason": "Student not found in main backend",
+                                "error_reason": rejection_reason,
                                 "message": f"❌ تم رفض {student_name}: غير موجود في النظام"
                             })
                             
-                            print(f"❌ Device {device.name}: Student {student_name} (UID {attendance.uid}) auto-rejected - not found in backend")
+                            print(f"❌ Device {device.name}: Student {student_name} (UID {attendance.uid}) auto-rejected - {rejection_reason.lower()}")
                             continue  # Skip to next attendance capture
+                        
+                        # SPECIAL CHECK 2: For 401 errors, check if student actually exists in main backend
+                        if status_code == 401 or "Not authenticated" in str(error_msg):
+                            print(f"🔍 401 ERROR DETECTED: Checking if student {student_name} (UID={attendance.uid}) exists in main backend...")
+                            
+                            # Try to check if student exists in main backend by making a separate request
+                            try:
+                                async with httpx.AsyncClient() as client:
+                                    # Send auth header to properly check if student exists
+                                    # Use global auth token to make authenticated requests
+                                    headers = {"Authorization": current_auth_token} if current_auth_token else {}
+                                    student_check_response = await client.get(
+                                        f"{HOST_REMOTE_URL}/students/{attendance.uid}",  # Direct student lookup
+                                        headers=headers,
+                                        timeout=10.0
+                                    )
+                                    
+                                    if student_check_response.status_code == 404:
+                                        # Student definitely doesn't exist in main backend
+                                        rejection_reason = "Student not found in main backend"
+                                        print(f"❌ AUTO-REJECT: Student {student_name} (UID={attendance.uid}) confirmed not in main backend - no pending decision needed")
+                                        
+                                        await manager.broadcast(
+                                            f"❌ AUTO-REJECTED: Student {student_name} (UID={attendance.uid}) {rejection_reason.lower()} (Device: {device.name}, Location: {device.location})"
+                                        )
+                                        
+                                        # Also broadcast rejection via Socket.IO
+                                        await broadcast_attendance({
+                                            "type": "attendance_update",
+                                            "uid": attendance.uid,
+                                            "student_id": attendance.uid,
+                                            "student_name": student_name,
+                                            "first_name": student.first_name if student else "Unknown",
+                                            "last_name": student.last_name if student else "Student",
+                                            "status": "rejected",
+                                            "mode": "online",
+                                            "device_name": device.name,
+                                            "device_location": device.location,
+                                            "group": "Unknown",
+                                            "date_key": now_cairo.strftime("%Y-%m-%d"),
+                                            "timestamp": now_cairo.isoformat(),
+                                            "is_correct_group": False,
+                                            "requires_approval": False,
+                                            "error_reason": rejection_reason,
+                                            "message": f"❌ تم رفض {student_name}: غير موجود في النظام"
+                                        })
+                                        
+                                        print(f"❌ Device {device.name}: Student {student_name} (UID {attendance.uid}) auto-rejected - {rejection_reason.lower()}")
+                                        continue  # Skip to next attendance capture
+                                    
+                                    else:
+                                        # Student exists in main backend, but 401 means auth/group issue
+                                        print(f"✅ Student {student_name} (UID={attendance.uid}) exists in main backend, 401 likely due to group/schedule issue")
+                                        # Continue to normal pending decision logic below
+                                        
+                            except Exception as check_error:
+                                print(f"⚠️ Warning: Could not verify student existence in main backend: {str(check_error)}")
+                                # If we can't check, assume it's a group/schedule issue and continue to pending decision
+                                print(f"📝 Assuming 401 is due to group/schedule issue, creating pending decision")
                         
                         # Pre-checks passed, now check if this requires a pending decision
                         # Check 1: Student exists in local database (already done above)
@@ -595,46 +780,91 @@ async def start_fingerprint_capture():
         print("⚠️ Fingerprint device disconnected")
 
 @router.post("/start_attendance")
-async def start_attendance():
-    """Start attendance capture on all enabled devices"""
-    global is_attendance_running, attendance_task
+async def start_attendance(request: Request, assistant=Depends(get_current_assistant)):
+    """Start attendance capture on all enabled devices (flexible: works with 1-6 devices)"""
+    global is_attendance_running, attendance_task, active_groups, current_auth_token
+    
+    # Store auth token globally for use in device capture functions
+    current_auth_token = request.headers.get("authorization")
+    print(f"🔑 Storing auth token for device capture: {current_auth_token[:20]}..." if current_auth_token else "🔑 No auth token available")
 
     if device_manager.is_capture_running():
         raise HTTPException(status_code=400, detail="Multi-device attendance already running")
     
-    # Try to start multi-device capture first
+    # Detect active groups from main backend before starting attendance
+    print(f"🔍 Detecting active groups from main backend...")
+    active_groups_result = await get_active_groups_from_backend(request)
+    
+    if active_groups_result["success"]:
+        active_groups = active_groups_result["data"]["active_groups"]
+        print(f"✅ Detected {len(active_groups)} active groups: {[g['group_name'] + ' (Level ' + str(g['level']) + ')' for g in active_groups]}")
+    else:
+        print(f"⚠️ Failed to detect active groups: {active_groups_result.get('error', 'Unknown error')}")
+        active_groups = []  # Continue without group detection
+    
+    # Try to start multi-device capture first (flexible: works with any number >= 1)
     result = await device_manager.start_all_capture_tasks(capture_from_device)
     
     if result["success"]:
-        # Multi-device mode succeeded
+        # Multi-device mode succeeded (works with 1, 2, 3, 4, 5, or 6 devices)
+        connected_count = result["total_devices"]
+        configured_count = result["total_configured"]
+        
+        success_message = result["message"]
+        if "devices_failed" in result and result["devices_failed"]:
+            failed_devices = ", ".join(result["devices_failed"])
+            success_message += f". Could not connect to: {failed_devices}"
+        
         return {
-            "message": result["message"],
+            "message": success_message,
             "mode": "multi-device",
             "devices_started": result["devices_started"],
-            "total_devices": result["total_devices"]
+            "devices_failed": result.get("devices_failed", []),
+            "connected_devices": connected_count,
+            "configured_devices": configured_count,
+            "status": "success" if connected_count == configured_count else "partial_success",
+            "active_groups": [{
+                "group_name": g["group_name"],
+                "level": g["level"],
+                "start_time": g["start_time"]
+            } for g in active_groups]
         }
     else:
-        # Multi-device failed, fall back to single device mode
-        print(f"⚠️ Multi-device startup failed: {result['message']}. Falling back to single device mode.")
-        
-        if is_attendance_running:
-            raise HTTPException(status_code=400, detail="Single-device attendance already running")
+        # Do not fall back to single device mode, instead return error
+        if result["message"] == "No devices connected successfully":
+            raise HTTPException(
+                status_code=400, 
+                detail="❌ No devices connected. Please check device connectivity and try again."
+            )
+        else:
+            # Other multi-device errors might still use fallback
+            print(f"⚠️ Multi-device startup failed: {result['message']}. Falling back to single device mode.")
+            
+            if is_attendance_running:
+                raise HTTPException(status_code=400, detail="Single-device attendance already running")
 
-        is_attendance_running = True
-        attendance_task = asyncio.create_task(start_fingerprint_capture())
-        return {
-            "message": "✅ Fingerprint attendance started (single-device fallback)",
-            "mode": "single-device",
-            "fallback_reason": result["message"]
-        }
+            is_attendance_running = True
+            attendance_task = asyncio.create_task(start_fingerprint_capture())
+            return {
+                "message": "✅ Fingerprint attendance started (single-device fallback)",
+                "mode": "single-device",
+                "fallback_reason": result["message"],
+                "active_groups": [{
+                    "group_name": g["group_name"],
+                    "level": g["level"],
+                    "start_time": g["start_time"]
+                } for g in active_groups]
+            }
 
 @router.post("/stop_attendance")
-async def stop_attendance():
-    """Stop attendance capture on all devices"""
-    global is_attendance_running, attendance_task
+async def stop_attendance(request: Request, assistant=Depends(get_current_assistant)):
+    """Stop attendance capture on all devices and mark absent students from detected groups"""
+    global is_attendance_running, attendance_task, active_groups, current_auth_token
     
     stopped_devices = False
     stopped_single = False
+    absent_count = 0
+    backend_sent_count = 0
     
     # Try to stop multi-device capture
     if device_manager.is_capture_running():
@@ -659,6 +889,58 @@ async def stop_attendance():
     if not stopped_devices and not stopped_single:
         raise HTTPException(status_code=400, detail="No attendance system is currently running")
     
+    # Mark absent students from groups that were detected at start (if any were detected)
+    if active_groups:
+        print(f"📋 Processing {len(active_groups)} active groups for absent marking...")
+        active_groups_info = [(g['group_name'], f"Level {g['level']}", g['start_time']) for g in active_groups]
+        print(f"🔍 Active groups detected at start: {active_groups_info}")
+        
+        # Get today's date key
+        now_cairo = datetime.now(pytz.timezone("Africa/Cairo"))
+        date_key = now_cairo.strftime("%Y-%m-%d")
+        
+        # Extract active group levels
+        active_group_levels = [group["level"] for group in active_groups]
+        
+        print(f"🎯 Marking absent ONLY students in detected group levels: {active_group_levels}")
+        print(f"🎯 Students who didn't put their finger on device during this session will be marked absent")
+        
+        # Mark absent students only from detected groups who didn't attend
+        absent_result = await mark_absent_students(active_group_levels, date_key)
+        
+        if absent_result["success"]:
+            absent_count = absent_result["absent_count"]
+            backend_sent_count = absent_result.get("backend_sent_count", 0)
+            if absent_count > 0:
+                print(f"✅ Marked {absent_count} students as absent from detected groups")
+                print(f"🚀 Sent {backend_sent_count} absent records to main backend")
+                await manager.broadcast(
+                    f"📋 ATTENDANCE COMPLETED: Marked {absent_count} students as absent from detected groups (Levels: {active_group_levels}). Sent {backend_sent_count} to main backend."
+                )
+            else:
+                print(f"ℹ️ No students needed to be marked absent - all students in detected groups attended")
+                await manager.broadcast(
+                    f"ℹ️ ATTENDANCE COMPLETED: All students in detected groups attended (Levels: {active_group_levels})"
+                )
+        else:
+            print(f"⚠️ Error marking absent students: {absent_result.get('error', 'Unknown error')}")
+            await manager.broadcast(
+                f"⚠️ WARNING: Error occurred while marking absent students: {absent_result.get('error', 'Unknown error')}"
+            )
+    else:
+        print(f"ℹ️ No active groups were detected when attendance started - skipping absent marking")
+        print(f"ℹ️ This means no groups were scheduled to attend during the attendance session time")
+        await manager.broadcast(
+            f"ℹ️ ATTENDANCE COMPLETED: No groups were scheduled, so no absent marking was performed"
+        )
+    
+    # Clear active groups after processing
+    active_groups = []
+    
+    # Clear auth token after stopping attendance
+    current_auth_token = None
+    print(f"🔑 Cleared auth token after stopping attendance")
+    
     messages = []
     if stopped_devices:
         messages.append("Multi-device attendance stopped")
@@ -668,12 +950,15 @@ async def stop_attendance():
     return {
         "message": "🛑 " + " and ".join(messages),
         "multi_device_stopped": stopped_devices,
-        "single_device_stopped": stopped_single
+        "single_device_stopped": stopped_single,
+        "absent_students_marked": absent_count,
+        "absent_sent_to_backend": backend_sent_count,
+        "groups_processed": len(active_group_levels) if active_groups else 0
     }
 
 
 @router.get("/attendance-status")
-async def get_attendance_status():
+async def get_attendance_status(assistant=Depends(get_current_assistant)):
     """Get current attendance system status (both single and multi-device)"""
     multi_device_running = device_manager.is_capture_running()
     single_device_running = is_attendance_running
@@ -694,7 +979,7 @@ async def get_attendance_status():
 
 
 @router.get("/devices")
-async def get_all_devices():
+async def get_all_devices(assistant=Depends(get_current_assistant)):
     """Get information about all configured devices"""
     devices_status = device_manager.get_device_status()
     return {
@@ -705,7 +990,7 @@ async def get_all_devices():
 
 
 @router.get("/devices/{device_id}")
-async def get_device_info(device_id: str):
+async def get_device_info(device_id: str, assistant=Depends(get_current_assistant)):
     """Get information about a specific device"""
     device = device_manager.get_device(device_id)
     if not device:
@@ -716,7 +1001,7 @@ async def get_device_info(device_id: str):
 
 
 @router.post("/devices/{device_id}/test-connection")
-async def test_device_connection(device_id: str):
+async def test_device_connection(device_id: str, assistant=Depends(get_current_assistant)):
     """Test connection to a specific device"""
     device = device_manager.get_device(device_id)
     if not device:
@@ -751,7 +1036,7 @@ async def test_device_connection(device_id: str):
 
 
 @router.get("/student-attendance/{uid}")
-async def get_student_attendance(uid: int):
+async def get_student_attendance(uid: int, assistant=Depends(get_current_assistant)):
     """Get attendance record for a specific student"""
     student = await Student.find_one(Student.uid == uid)
     if not student:
@@ -766,7 +1051,7 @@ async def get_student_attendance(uid: int):
 
 
 @router.get("/pending-decisions")
-async def get_pending_decisions():
+async def get_pending_decisions(assistant=Depends(get_current_assistant)):
     """Get all pending attendance decisions waiting for assistant approval"""
     print(f"🔍 DEBUG GET /pending-decisions: Current pending_decisions state:")
     print(f"   - Total count: {len(pending_decisions)}")
@@ -788,7 +1073,7 @@ async def get_pending_decisions():
     }
 
 @router.get("/debug/pending-decisions-raw")
-async def debug_pending_decisions_raw():
+async def debug_pending_decisions_raw(assistant=Depends(get_current_assistant)):
     """Debug endpoint to see raw pending decisions data"""
     return {
         "raw_pending_decisions": pending_decisions,
@@ -798,7 +1083,7 @@ async def debug_pending_decisions_raw():
 
 
 @router.post("/assistant-decision/{decision_id}")
-async def make_assistant_decision(decision_id: str, decision: str = Query(..., description="Decision: 'approve' or 'reject'")):
+async def make_assistant_decision(decision_id: str, request: Request, decision: str = Query(..., description="Decision: 'approve' or 'reject'"), assistant=Depends(get_current_assistant)):
     """REST endpoint for assistant to approve/reject attendance
     
     Args:
@@ -808,7 +1093,7 @@ async def make_assistant_decision(decision_id: str, decision: str = Query(..., d
     if decision.lower() not in ["approve", "reject"]:
         raise HTTPException(status_code=400, detail="Decision must be 'approve' or 'reject'")
     
-    result = await process_assistant_decision(decision_id, decision)
+    result = await process_assistant_decision(decision_id, decision, request)
     
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -816,7 +1101,7 @@ async def make_assistant_decision(decision_id: str, decision: str = Query(..., d
     return result
 
 
-async def process_assistant_decision(decision_id: str, decision: str):
+async def process_assistant_decision(decision_id: str, decision: str, request: Request = None):
     """Process assistant's approve/reject decision"""
     if decision_id not in pending_decisions:
         return {"success": False, "error": "Decision ID not found or already processed"}
@@ -844,7 +1129,7 @@ async def process_assistant_decision(decision_id: str, decision: str):
                 
                 # Send attendance to main backend with assistant_approved=True
                 try:
-                    response = await send_attendance_to_server_approved(pending_data['uid'], pending_data['timestamp'])
+                    response = await send_attendance_to_server_approved(pending_data['uid'], pending_data['timestamp'], request)
                     if not response['success']:
                         raise Exception(response['error'])
 
@@ -884,6 +1169,94 @@ async def process_assistant_decision(decision_id: str, decision: str):
         return {"success": True, "message": "Attendance rejected"}
     
     return {"success": False, "error": "Invalid decision. Use 'approve' or 'reject'"}
+
+
+@router.post("/make-attendance/{uid}")
+async def make_attendance_by_uid(uid: int, request: Request, assistant=Depends(get_current_assistant)):
+    """Make attendance for a student using their UID"""
+    try:
+        # Find the student by UID
+        student = await Student.find_one(Student.uid == uid)
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+        
+        # Get current timestamp and date
+        now = datetime.now(pytz.timezone("Africa/Cairo"))
+        timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+        date_key = now.strftime("%Y-%m-%d")
+        
+        # Initialize attendance if it doesn't exist
+        if not hasattr(student, "attendance") or not isinstance(student.attendance, dict):
+            student.attendance = {}
+        
+        # Check internet connectivity
+        internet_available = await check_internet_connectivity()
+        
+        if internet_available:
+            # Internet is available - save locally and sync to main backend
+            student.attendance[date_key] = True
+            await student.save()
+            
+            # Send attendance to main backend
+            try:
+                response = await send_attendance_to_server_approved(uid, timestamp)
+                if response['success']:
+                    await manager.broadcast(
+                        f"✅ MANUAL ATTENDANCE: UID={uid}, Name={student.first_name} {student.last_name}, Date={date_key}, Status=Present (Online Sync)"
+                    )
+                    print(f"✅ MANUAL ATTENDANCE: UID={uid}, Student={student.first_name} {student.last_name}, Date={date_key} (Online Sync)")
+                else:
+                    await manager.broadcast(
+                        f"⚠️ WARNING: Failed to send to main backend for UID={uid}: {response['error']}"
+                    )
+                    print(f"⚠️ WARNING: Failed to send to main backend for UID={uid}: {response['error']}")
+            except Exception as e:
+                await manager.broadcast(
+                    f"⚠️ WARNING: Failed to send to main backend for UID={uid}: {str(e)}"
+                )
+                print(f"⚠️ WARNING: Failed to send to main backend for UID={uid}: {str(e)}")
+            
+            return {
+                "success": True,
+                "message": "Attendance marked successfully (Online Sync)",
+                "uid": uid,
+                "student_name": f"{student.first_name} {student.last_name}",
+                "date": date_key,
+                "timestamp": timestamp,
+                "sync_status": "online"
+            }
+        
+        else:
+            # No internet - save as offline attendance
+            offline_day_key = f"{date_key}_offline"
+            student.attendance[offline_day_key] = {
+                "timestamp": timestamp,
+                "synced": False
+            }
+            await student.save()
+            
+            await manager.broadcast(
+                f"📱 OFFLINE ATTENDANCE: UID={uid}, Name={student.first_name} {student.last_name}, Date={date_key}, Status=Present (Offline - Will Sync Later)"
+            )
+            print(f"📱 OFFLINE ATTENDANCE: UID={uid}, Student={student.first_name} {student.last_name}, Date={date_key} (Offline - Will Sync Later)")
+            
+            return {
+                "success": True,
+                "message": "Attendance marked successfully (Offline - Will sync when internet returns)",
+                "uid": uid,
+                "student_name": f"{student.first_name} {student.last_name}",
+                "date": date_key,
+                "timestamp": timestamp,
+                "sync_status": "offline"
+            }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        await manager.broadcast(
+            f"⚠️ ERROR: Failed to mark attendance for UID={uid}: {str(e)}"
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to mark attendance: {str(e)}")
 
 
 @router.websocket("/ws")

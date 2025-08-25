@@ -157,7 +157,9 @@ async def sync_missing_students_worker():
                             continue
                         
                         # Student doesn't exist, create it
-                        headers = {"Authorization": f"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjY4ODVlNGQzZmVkZWU1ZWI3Nzc5MWVhNiIsInJvbGUiOiJhc3Npc3RhbnQiLCJzdWIiOiJhaG1lZCIsImV4cCI6MTc1NDIzNTQ5Mn0.nJa3uIlvrKFgqpeWzeinHOb-s3LkDv2EhzUKUIXUW1g"}
+                        # Note: Sync service runs in background without request context
+                        # Using empty headers for now - consider implementing service token
+                        headers = {}
                         response = await client.post(
                             f"{HOST_REMOTE_URL}/students/",
                             json=student_data,

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends, Request
 from datetime import datetime
 import httpx
 import os
@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 from typing import Dict
 import time
+from app.dependencies.auth import get_current_assistant
 
 from app.utils.exam_corrector import correct_student_exam
 from app.utils.model_detector import detect_exam_model
@@ -24,13 +25,16 @@ STUDENT_SOLUTION_DIR = "upload/student_solutions"
 os.makedirs(STUDENT_SOLUTION_DIR, exist_ok=True)
 
 @router.get("/{exam_id}/debug")
-async def debug_exam_solution_path(exam_id: str):
+async def debug_exam_solution_path(exam_id: str, request: Request, assistant=Depends(get_current_assistant)):
     """Debug endpoint to check exam solution path"""
     try:
         # Get exam details from main backend
+        token = request.headers.get("authorization")
+        headers = {"Authorization": token} if token else {}
         async with httpx.AsyncClient() as client:
             exam_response = await client.get(
                 f"{MAIN_BACKEND_URL}/internal/exams/{exam_id}",
+                headers=headers,
                 timeout=30.0
             )
             
@@ -75,7 +79,7 @@ async def debug_exam_solution_path(exam_id: str):
         }
 
 @router.post("/debug/detect-model")
-async def debug_model_detection(image_file: UploadFile = File(...)):
+async def debug_model_detection(request: Request, image_file: UploadFile = File(...), assistant=Depends(get_current_assistant)):
     """Debug endpoint to test model detection on uploaded image"""
     try:
         # Save uploaded image temporarily
@@ -106,7 +110,7 @@ async def debug_model_detection(image_file: UploadFile = File(...)):
         }
 
 @router.post("/debug/detect-student-id")
-async def debug_student_id_detection(image_file: UploadFile = File(...)):
+async def debug_student_id_detection(request: Request, image_file: UploadFile = File(...), assistant=Depends(get_current_assistant)):
     """Debug endpoint to test student ID detection on uploaded image"""
     try:
         # Save uploaded image temporarily
@@ -137,7 +141,7 @@ async def debug_student_id_detection(image_file: UploadFile = File(...)):
         }
 
 @router.post("/debug_student_id_detection")
-async def debug_student_id_detection_alt(image: UploadFile = File(...)):
+async def debug_student_id_detection_alt(request: Request, image: UploadFile = File(...), assistant=Depends(get_current_assistant)):
     """Alternative debug endpoint to test student ID detection (matches your URL)"""
     try:
         # Save uploaded image temporarily
@@ -170,10 +174,12 @@ async def debug_student_id_detection_alt(image: UploadFile = File(...)):
 @router.post("/{exam_id}/submit-with-scanner")
 async def submit_exam_solution_with_scanner(
     exam_id: str,
+    request: Request,
     manual_student_id: str = Form(None),  # Optional manual student ID fallback
     force_manual_id: str = Form(None),    # Accept as string and convert
     scan_resolution: int = Form(300),     # Scanner resolution in DPI
-    scan_mode: str = Form("Color")        # Scanner mode
+    scan_mode: str = Form("Color"),        # Scanner mode
+    assistant=Depends(get_current_assistant)
 ):
     """
     Submit and automatically correct a student's exam solution using scanner.
@@ -185,9 +191,12 @@ async def submit_exam_solution_with_scanner(
     
     try:
         # Step 1: Get exam details from main backend
+        token = request.headers.get("authorization")
+        headers = {"Authorization": token} if token else {}
         async with httpx.AsyncClient() as client:
             exam_response = await client.get(
                 f"{MAIN_BACKEND_URL}/internal/exams/{exam_id}",
+                headers=headers,
                 timeout=30.0
             )
             
@@ -206,7 +215,7 @@ async def submit_exam_solution_with_scanner(
         if not scanner.connect_scanner():
             raise HTTPException(
                 status_code=503,
-                detail="Failed to connect to scanner. Please ensure scanner is connected and powered on."
+                detail="Failed to connect to scanner. Please ensure your Canon TS3400 is connected to the network and powered on."
             )
         
         scanner_info = scanner.get_scanner_info()
@@ -379,6 +388,7 @@ async def submit_exam_solution_with_scanner(
             async with httpx.AsyncClient() as client:
                 student_lookup_response = await client.get(
                     f"{MAIN_BACKEND_URL}/internal/students/by-student-id/{student_numeric_id}",
+                    headers=headers,
                     timeout=30.0
                 )
                 
@@ -649,6 +659,7 @@ async def submit_exam_solution_with_scanner(
             result_response = await client.post(
                 f"{MAIN_BACKEND_URL}/internal/exams/{exam_id}/results",
                 json=result_data,
+                headers=headers,
                 timeout=30.0
             )
             
@@ -697,10 +708,12 @@ async def submit_exam_solution_with_scanner(
 @router.post("/{exam_id}/submit-with-auto-feeder")
 async def submit_exam_solutions_with_auto_feeder(
     exam_id: str,
+    request: Request,
     scan_resolution: int = Form(300),     # Scanner resolution in DPI
     scan_mode: str = Form("Color"),       # Scanner mode
     max_sheets: int = Form(50),           # Maximum number of sheets to process
-    manual_student_ids: str = Form(None)  # Optional comma-separated fallback IDs
+    manual_student_ids: str = Form(None),  # Optional comma-separated fallback IDs
+    assistant=Depends(get_current_assistant)
 ):
     """
     Submit and automatically correct multiple student exam solutions using scanner's auto-feeder.
@@ -713,9 +726,12 @@ async def submit_exam_solutions_with_auto_feeder(
     
     try:
         # Step 1: Get exam details from main backend
+        token = request.headers.get("authorization")
+        headers = {"Authorization": token} if token else {}
         async with httpx.AsyncClient() as client:
             exam_response = await client.get(
                 f"{MAIN_BACKEND_URL}/internal/exams/{exam_id}",
+                headers=headers,
                 timeout=30.0
             )
             
@@ -797,6 +813,7 @@ async def submit_exam_solutions_with_auto_feeder(
                     exam_data=exam_data,
                     sheet_path=current_temp_path,
                     sheet_number=sheet_number,
+                    request=request,
                     manual_student_id=manual_ids_list[sheet_number-1] if sheet_number-1 < len(manual_ids_list) else None
                 )
                 
@@ -882,7 +899,7 @@ async def submit_exam_solutions_with_auto_feeder(
                         pass
 
 
-async def process_single_sheet(exam_id: str, exam_data: dict, sheet_path: str, sheet_number: int, manual_student_id: str = None):
+async def process_single_sheet(exam_id: str, exam_data: dict, sheet_path: str, sheet_number: int, request: Request, manual_student_id: str = None):
     """
     Process a single scanned sheet through the complete correction pipeline.
     Returns a result dictionary with student info and correction results.
@@ -965,9 +982,13 @@ async def process_single_sheet(exam_id: str, exam_data: dict, sheet_path: str, s
         try:
             student_numeric_id = int(detected_student_id)
             
+            token = request.headers.get("authorization")
+            headers = {"Authorization": token} if token else {}
+            
             async with httpx.AsyncClient() as client:
                 student_lookup_response = await client.get(
                     f"{MAIN_BACKEND_URL}/internal/students/by-student-id/{student_numeric_id}",
+                    headers=headers,
                     timeout=30.0
                 )
                 
@@ -1132,6 +1153,7 @@ async def process_single_sheet(exam_id: str, exam_data: dict, sheet_path: str, s
             result_response = await client.post(
                 f"{MAIN_BACKEND_URL}/internal/exams/{exam_id}/results",
                 json=result_data,
+                headers=headers,
                 timeout=30.0
             )
             
@@ -1165,9 +1187,11 @@ async def process_single_sheet(exam_id: str, exam_data: dict, sheet_path: str, s
 @router.post("/{exam_id}/submit")
 async def submit_exam_solution(
     exam_id: str,
+    request: Request,
     solution_photo: UploadFile = File(...),
     manual_student_id: str = Form(None),  # Optional manual student ID fallback
-    force_manual_id: str = Form(None)     # Accept as string and convert
+    force_manual_id: str = Form(None),     # Accept as string and convert
+    assistant=Depends(get_current_assistant)
 ):
     """
     Submit and automatically correct a student's exam solution (original upload method).
@@ -1176,9 +1200,12 @@ async def submit_exam_solution(
     """
     try:
         # Step 1: Get exam details from main backend
+        token = request.headers.get("authorization")
+        headers = {"Authorization": token} if token else {}
         async with httpx.AsyncClient() as client:
             exam_response = await client.get(
                 f"{MAIN_BACKEND_URL}/internal/exams/{exam_id}",
+                headers=headers,
                 timeout=30.0
             )
             
@@ -1356,6 +1383,7 @@ async def submit_exam_solution(
             async with httpx.AsyncClient() as client:
                 student_lookup_response = await client.get(
                     f"{MAIN_BACKEND_URL}/internal/students/by-student-id/{student_numeric_id}",
+                    headers=headers,
                     timeout=30.0
                 )
                 
@@ -1651,6 +1679,7 @@ async def submit_exam_solution(
             result_response = await client.post(
                 f"{MAIN_BACKEND_URL}/internal/exams/{exam_id}/results",
                 json=result_data,
+                headers=headers,
                 timeout=30.0
             )
             
@@ -1684,7 +1713,9 @@ async def submit_exam_solution(
 @router.post("/{exam_id}/students/{student_id}/correct")
 async def manually_correct_exam(
     exam_id: str,
-    student_id: str
+    student_id: str,
+    request: Request,
+    assistant=Depends(get_current_assistant)
 ):
     """
     Manually trigger exam correction for a student who has already submitted.
@@ -1692,9 +1723,12 @@ async def manually_correct_exam(
     """
     try:
         # Step 1: Get exam details from main backend
+        token = request.headers.get("authorization")
+        headers = {"Authorization": token} if token else {}
         async with httpx.AsyncClient() as client:
             exam_response = await client.get(
                 f"{MAIN_BACKEND_URL}/internal/exams/{exam_id}",
+                headers=headers,
                 timeout=30.0
             )
             
@@ -1710,6 +1744,7 @@ async def manually_correct_exam(
         async with httpx.AsyncClient() as client:
             student_response = await client.get(
                 f"{MAIN_BACKEND_URL}/internal/exams/{exam_id}/students/{student_id}",
+                headers=headers,
                 timeout=30.0
             )
             
@@ -1757,6 +1792,7 @@ async def manually_correct_exam(
                 update_response = await client.put(
                     f"{MAIN_BACKEND_URL}/internal/exams/{exam_id}/students/{student_id}/results",
                     json=result_data,
+                    headers=headers,
                     timeout=30.0
                 )
                 

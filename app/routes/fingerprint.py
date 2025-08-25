@@ -23,7 +23,7 @@ router = APIRouter(
 )
 
 @router.get("/", summary="List students (newest first)")
-async def list_students(skip: int = 0, limit: int = 100):
+async def list_students(skip: int = 0, limit: int = 100, assistant=Depends(get_current_assistant)):
     """
     Return students sorted by most recently added first.
     Uses the document id timestamp for ordering (descending).
@@ -62,10 +62,15 @@ async def register_student_with_fingerprint(
     if online:
         token = request.headers.get("authorization")
         headers = {"Authorization": token} if token else {}
+        
+        print(f"🔑 Using token for backend API: {token[:20] + '...' if token else 'No token'}")
 
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.get(f"{HOST_REMOTE_URL}/students/next-ids", headers=headers)
+                print(f"📡 Backend response status: {response.status_code}")
+                if response.status_code != 200:
+                    print(f"❌ Backend response: {response.text}")
 
             if response.status_code != 200:
                 raise HTTPException(status_code=500, detail="Failed to get UID and student_id from main backend")
@@ -158,12 +163,19 @@ async def register_student_with_fingerprint(
         })
 
         try:
+            print(f"📤 Sending student data to backend: {HOST_REMOTE_URL}/students/")
+            print(f"🔑 Headers being sent: {headers}")
+            print(f"📋 Payload being sent: {student_payload}")
+            
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.post(
                     f"{HOST_REMOTE_URL}/students/",
                     json=student_payload,
                     headers=headers
                 )
+            
+            print(f"📡 Backend response status for student creation: {response.status_code}")
+            print(f"📡 Backend response text: {response.text}")
 
             if response.status_code != 200:
                 error_text = response.text
@@ -296,7 +308,7 @@ async def register_student_with_fingerprint(
 
 
 @router.delete("/delete_fingerprint/{student_id}")
-async def delete_fingerprint(student_id: int):
+async def delete_fingerprint(student_id: int, assistant=Depends(get_current_assistant)):
     configure_network()
     
     # Step 1: Delete from fingerprint device
@@ -337,7 +349,7 @@ async def delete_fingerprint(student_id: int):
 
 
 @router.delete("/delete_from_all_devices/{uid}")
-async def delete_from_all_fingerprint_devices(uid: int):
+async def delete_from_all_fingerprint_devices(uid: int, assistant=Depends(get_current_assistant)):
     """
     Delete a student from all fingerprint devices.
     Useful for fixing "user already exists" errors.
@@ -360,7 +372,7 @@ async def delete_from_all_fingerprint_devices(uid: int):
 
 
 @router.post("/init-counter")
-async def init_counter(start_value: int = 10018):
+async def init_counter(start_value: int = 10018, assistant=Depends(get_current_assistant)):
     """
     Initialize the local student counter to a specific value.
     Use this to set the starting point for student IDs.
@@ -373,7 +385,7 @@ async def init_counter(start_value: int = 10018):
 
 
 @router.get("/connectivity-status")
-async def connectivity_status():
+async def connectivity_status(assistant=Depends(get_current_assistant)):
     """
     Check the current internet connectivity status.
     """
@@ -386,7 +398,7 @@ async def connectivity_status():
 
 
 @router.get("/fingerprint-device-status")
-async def fingerprint_device_status():
+async def fingerprint_device_status(assistant=Depends(get_current_assistant)):
     """
     Check fingerprint device connectivity and status.
     Useful for troubleshooting enrollment timeouts.
@@ -455,7 +467,7 @@ async def fingerprint_device_status():
 
 
 @router.get("/missing-students")
-async def get_missing_students():
+async def get_missing_students(assistant=Depends(get_current_assistant)):
     """
     Get all students that were created offline and need to be synced.
     """
@@ -483,7 +495,7 @@ async def get_missing_students():
 
 
 @router.post("/sync-missing-students")
-async def manual_sync_missing_students():
+async def manual_sync_missing_students(assistant=Depends(get_current_assistant)):
     """
     Manually trigger sync of missing students.
     """
@@ -510,7 +522,7 @@ async def manual_sync_missing_students():
 
 
 @router.post("/cleanup-synced-students")
-async def cleanup_synced_students():
+async def cleanup_synced_students(assistant=Depends(get_current_assistant)):
     """
     Clean up students that are marked as synced but still exist in missing_students collection.
     This is useful when the deletion process failed after successful sync.

@@ -157,6 +157,37 @@ class ScannerConnection:
             # Set scan parameters
             print(f"🔧 Setting scan parameters: {resolution} DPI, {mode} mode")
             
+            # IMPORTANT: Force flatbed source instead of document feeder
+            # This fixes "Document feeder out of documents" error
+            if hasattr(self.scanner, 'source'):
+                try:
+                    # Try common flatbed source names
+                    flatbed_names = ['Flatbed', 'flatbed', 'Platen', 'platen', 'Scanner', 'scanner']
+                    current_source = getattr(self.scanner, 'source', None)
+                    print(f"🔍 Current scan source: {current_source}")
+                    
+                    # Get available sources
+                    if hasattr(self.scanner, 'get_parameters'):
+                        try:
+                            params = self.scanner.get_parameters()
+                            print(f"📋 Available scanner parameters: {params}")
+                        except:
+                            pass
+                    
+                    # Try to set flatbed source
+                    for flatbed_name in flatbed_names:
+                        try:
+                            self.scanner.source = flatbed_name
+                            print(f"✅ Scan source set to: {flatbed_name}")
+                            break
+                        except Exception as e:
+                            print(f"⚠️ Could not set source to {flatbed_name}: {e}")
+                            continue
+                    
+                except Exception as e:
+                    print(f"⚠️ Could not configure scan source: {e}")
+                    print("📝 Continuing with default source...")
+            
             # Set resolution if supported
             if hasattr(self.scanner, 'resolution'):
                 self.scanner.resolution = resolution
@@ -169,8 +200,91 @@ class ScannerConnection:
             
             print("📷 Starting scan...")
             
-            # Start the scan
-            self.scanner.start()
+            # Additional flatbed enforcement before scan
+            try:
+                # Force flatbed one more time before scanning
+                if hasattr(self.scanner, 'source'):
+                    self.scanner.source = 'Flatbed'
+                    print(f"🔒 Final source confirmation: {self.scanner.source}")
+                    
+                # Set scan area to full flatbed (this can help force flatbed mode)
+                if hasattr(self.scanner, 'tl_x'):
+                    self.scanner.tl_x = 0.0
+                if hasattr(self.scanner, 'tl_y'):
+                    self.scanner.tl_y = 0.0
+                if hasattr(self.scanner, 'br_x') and hasattr(self.scanner, 'br_y'):
+                    # Use reasonable A4 size or scanner max
+                    try:
+                        # Get scanner max dimensions
+                        max_x = getattr(self.scanner, 'br_x', 215.0)
+                        max_y = getattr(self.scanner, 'br_y', 297.0)
+                        self.scanner.br_x = max_x
+                        self.scanner.br_y = max_y
+                        print(f"📐 Scan area set: (0,0) to ({max_x},{max_y})mm")
+                    except:
+                        pass
+                        
+            except Exception as e:
+                print(f"⚠️ Pre-scan configuration warning: {e}")
+            
+            # Try multiple scan approaches to avoid document feeder issues
+            scan_success = False
+            last_error = None
+            
+            # Approach 1: Normal scan with flatbed enforcement
+            try:
+                print("🎯 Attempting scan approach 1: Normal with flatbed enforcement...")
+                self.scanner.start()
+                scan_success = True
+            except Exception as e1:
+                last_error = str(e1)
+                print(f"❌ Scan approach 1 failed: {e1}")
+                
+                # Approach 2: Reset scanner and try again with different settings
+                try:
+                    print("🎯 Attempting scan approach 2: Reset and retry...")
+                    # Close and reopen scanner connection
+                    temp_name = self.scanner_name
+                    self.scanner.close()
+                    self.scanner = sane.open(temp_name)
+                    
+                    # Reapply settings
+                    if hasattr(self.scanner, 'source'):
+                        self.scanner.source = 'Flatbed'
+                    if hasattr(self.scanner, 'resolution'):
+                        self.scanner.resolution = resolution
+                    if hasattr(self.scanner, 'mode'):
+                        self.scanner.mode = mode
+                    
+                    # Try scan again
+                    self.scanner.start()
+                    scan_success = True
+                    print("✅ Scan approach 2 succeeded!")
+                except Exception as e2:
+                    last_error = str(e2)
+                    print(f"❌ Scan approach 2 failed: {e2}")
+                    
+                    # Approach 3: Try with minimal settings
+                    try:
+                        print("🎯 Attempting scan approach 3: Minimal settings...")
+                        # Close and reopen again
+                        temp_name = self.scanner_name
+                        self.scanner.close()
+                        self.scanner = sane.open(temp_name)
+                        
+                        # Set only essential settings
+                        if hasattr(self.scanner, 'source'):
+                            self.scanner.source = 'Flatbed'
+                            
+                        self.scanner.start()
+                        scan_success = True
+                        print("✅ Scan approach 3 succeeded!")
+                    except Exception as e3:
+                        last_error = str(e3)
+                        print(f"❌ Scan approach 3 failed: {e3}")
+            
+            if not scan_success:
+                raise Exception(f"All scan approaches failed. Last error: {last_error}")
             
             # Get the scanned image
             image = self.scanner.snap()
