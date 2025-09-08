@@ -7,7 +7,7 @@ from app.dependencies.auth import get_current_assistant
 from app.models.student import Student
 from app.models.missing_student import MissingStudent
 from app.utils.internet_check import check_internet_connectivity
-from app.utils.local_id_generator import get_next_student_id_offline, sync_local_counter_with_remote, initialize_student_counter, peek_next_student_id_offline, increment_student_counter
+from app.utils.local_id_generator import get_next_student_id_offline, sync_local_counter_with_remote, initialize_student_counter, peek_next_student_id_offline, increment_student_counter, sync_local_counter_with_uid
 import subprocess
 import httpx
 import os
@@ -33,6 +33,231 @@ async def list_students(skip: int = 0, limit: int = 100, assistant=Depends(get_c
         return {"count": len(students), "data": students}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch students: {e}")
+
+
+@router.get("/without-fingerprint", summary="List students without fingerprint")
+async def list_students_without_fingerprint(page: int = 1, limit: int = 10, assistant=Depends(get_current_assistant)):
+    """
+    Return students who don't have fingerprint enrolled (fingerprint_template is null or missing).
+    These are typically students created via Main Backend without fingerprint.
+    
+    Args:
+        page: Page number (starts from 1)
+        limit: Number of items per page
+    """
+    try:
+        # Calculate skip value from page
+        skip = (page - 1) * limit
+        
+        # Query for counting total students without fingerprint
+        total_query = {
+            "$or": [
+                {"fingerprint_template": None},
+                {"fingerprint_template": {"$exists": False}},
+                {"fingerprint_template": ""},
+                {"fingerprint_template": {"$in": [None, "", "null"]}}
+            ]
+        }
+        
+        # Get total count
+        total_students = await Student.find(total_query).count()
+        
+        # Find students with pagination
+        students = await Student.find(total_query).sort(-Student.id).skip(skip).limit(limit).to_list()
+        
+        # Calculate pagination info
+        total_pages = (total_students + limit - 1) // limit  # Ceiling division
+        has_next = page < total_pages
+        has_prev = page > 1
+        
+        print(f"📋 Found {len(students)} students without fingerprint (Page {page}/{total_pages})")
+        
+        return {
+            "data": students,
+            "pagination": {
+                "current_page": page,
+                "total_pages": total_pages,
+                "total_items": total_students,
+                "items_per_page": limit,
+                "items_on_page": len(students),
+                "has_next": has_next,
+                "has_prev": has_prev
+            },
+            "message": f"Students without fingerprint (Page {page} of {total_pages})"
+        }
+    except Exception as e:
+        print(f"❌ Error fetching students without fingerprint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch students without fingerprint: {e}")
+
+
+@router.post("/enroll-fingerprint/{uid}", summary="Add fingerprint to existing student")
+async def enroll_fingerprint_for_existing_student(
+    uid: int,
+    assistant=Depends(get_current_assistant)
+):
+    """
+    Add fingerprint to an existing student who doesn't have one.
+    This is useful for students created via Main Backend without fingerprint.
+    
+    Args:
+        uid: The UID of the student to enroll fingerprint for
+    """
+    configure_network()
+    
+    try:
+        # Step 1: Find the student in local database
+        student = await Student.find_one(Student.uid == uid)
+        if not student:
+            raise HTTPException(status_code=404, detail=f"Student with UID {uid} not found")
+        
+        # Step 2: Check if student already has fingerprint
+        if student.fingerprint_template and student.fingerprint_template.strip():
+            return {
+                "success": False,
+                "message": f"Student {student.first_name} {student.last_name} already has fingerprint enrolled",
+                "uid": uid,
+                "student_name": f"{student.first_name} {student.last_name}"
+            }
+        
+        print(f"🔍 Starting fingerprint enrollment for existing student: {student.first_name} {student.last_name} (UID: {uid})")
+        
+        # Step 3: Enroll fingerprint using multi-device system with enhanced error handling
+        enrollment_result = enroll_fingerprint_multi_device(uid, f"{student.first_name}_{student.last_name}", device_manager)
+        
+        # If enrollment failed, check if it's due to user already existing
+        if not enrollment_result["success"]:
+            error_msg = enrollment_result.get("error", "").lower()
+            
+            # Check if the error is related to user already existing
+            if "already exists" in error_msg or "user with uid" in error_msg or "duplicate" in error_msg:
+                print(f"⚠️ Detected 'user already exists' error. Attempting to delete student UID={uid} from all devices...")
+                
+                # Delete the student from all devices
+                delete_result = delete_student_from_all_devices(uid, device_manager)
+                print(f"🗑️ Deletion result: {delete_result['message']}")
+                
+                if delete_result["success"] or len(delete_result["deleted_from_devices"]) > 0:
+                    print(f"🔄 Retrying enrollment after deletion...")
+                    
+                    # Retry enrollment after deletion
+                    enrollment_result = enroll_fingerprint_multi_device(uid, f"{student.first_name}_{student.last_name}", device_manager)
+                    
+                    if enrollment_result["success"]:
+                        print(f"✅ Enrollment successful after deletion and retry!")
+                    else:
+                        print(f"❌ Enrollment still failed after deletion and retry: {enrollment_result['error']}")
+                else:
+                    print(f"❌ Failed to delete user from devices: {delete_result['message']}")
+        
+        # If still failed after potential retry, try single device fallback
+        if not enrollment_result["success"]:
+            print(f"⚠️ Multi-device enrollment failed: {enrollment_result['error']}. Trying single device fallback.")
+            template = enroll_fingerprint(uid, f"{student.first_name}_{student.last_name}")
+            if not template:
+                # BOTH multi-device and single device enrollment failed
+                final_error_msg = f"Fingerprint enrollment failed on all devices. Multi-device error: {enrollment_result['error']}. Please try again or check device connectivity."
+                print(f"❌ {final_error_msg}")
+                raise HTTPException(
+                    status_code=500, 
+                    detail=final_error_msg
+                )
+            # Single device fallback succeeded
+            device_used = None
+            print(f"✅ Fingerprint enrolled successfully using single device fallback")
+        else:
+            template = enrollment_result["template"]
+            device_used = enrollment_result["device_used"]
+            print(f"✅ Fingerprint enrolled successfully on device {device_used['name']} ({device_used['location']})")
+        
+        # Step 4: Update the student record with fingerprint template
+        student.fingerprint_template = template
+        await student.save()
+        print(f"✅ Updated student {student.first_name} {student.last_name} with fingerprint template")
+        
+        # Step 5: Try to update Main Backend if online
+        try:
+            online = await check_internet_connectivity()
+            if online:
+                print(f"📤 Attempting to update Main Backend with fingerprint data...")
+                
+                # We don't have the authorization token here, so we'll skip the Main Backend update
+                # The Main Backend can sync this data later if needed
+                print(f"ℹ️ Skipping Main Backend update (no auth token available). Fingerprint saved locally.")
+            else:
+                print(f"📴 Offline mode - fingerprint saved locally only")
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to update Main Backend: {e}")
+            # Don't fail the whole operation if Main Backend update fails
+        
+        return {
+            "success": True,
+            "message": f"Fingerprint successfully enrolled for {student.first_name} {student.last_name}",
+            "uid": uid,
+            "student_name": f"{student.first_name} {student.last_name}",
+            "student_id": student.student_id,
+            "device_used": device_used['name'] if device_used else "Single device fallback",
+            "fingerprint_enrolled": True
+        }
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        print(f"❌ Error enrolling fingerprint for student UID {uid}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to enroll fingerprint for student: {str(e)}"
+        )
+
+
+@router.get("/with-fingerprint", summary="List students with fingerprint")
+async def list_students_with_fingerprint(page: int = 1, limit: int = 10, assistant=Depends(get_current_assistant)):
+    """
+    Return students who have fingerprint enrolled (fingerprint_template is not null).
+    These are students created via Fingerprint Backend with fingerprint enrollment.
+    
+    Args:
+        page: Page number (starts from 1)
+        limit: Number of items per page
+    """
+    try:
+        # Calculate skip value from page
+        skip = (page - 1) * limit
+        
+        # Query for students with fingerprint
+        query = {
+            "fingerprint_template": {"$exists": True, "$ne": None, "$ne": ""},
+        }
+        
+        # Get total count
+        total_students = await Student.find(query).count()
+        
+        # Find students with pagination
+        students = await Student.find(query).sort(-Student.id).skip(skip).limit(limit).to_list()
+        
+        # Calculate pagination info
+        total_pages = (total_students + limit - 1) // limit  # Ceiling division
+        has_next = page < total_pages
+        has_prev = page > 1
+        
+        print(f"👆 Found {len(students)} students with fingerprint (Page {page}/{total_pages})")
+        
+        return {
+            "data": students,
+            "pagination": {
+                "current_page": page,
+                "total_pages": total_pages,
+                "total_items": total_students,
+                "items_per_page": limit,
+                "items_on_page": len(students),
+                "has_next": has_next,
+                "has_prev": has_prev
+            },
+            "message": f"Students with fingerprint enrolled (Page {page} of {total_pages})"
+        }
+    except Exception as e:
+        print(f"❌ Error fetching students with fingerprint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch students with fingerprint: {e}")
 
 def configure_network():
     result = subprocess.run(
@@ -519,6 +744,69 @@ async def manual_sync_missing_students(assistant=Depends(get_current_assistant))
         "pending_count": pending_count,
         "note": "Background sync runs every minute when internet is available"
     }
+
+
+@router.post("/sync-from-main")
+async def sync_student_from_main_backend(
+    student_data: dict,
+    current_assistant: dict = Depends(get_current_assistant)
+):
+    """
+    Receive student data from Main Backend and store locally without fingerprint.
+    This is for students created via Main Backend's create_student endpoint.
+    """
+    try:
+        print(f"🔄 Receiving student from Main Backend: {student_data.get('first_name')} {student_data.get('last_name')}")
+        
+        # Sync local counter with the UID from Main Backend
+        uid = student_data.get("uid")
+        if uid:
+            await sync_local_counter_with_uid(uid)
+        
+        # Create student in local Fingerprint Backend database
+        local_student = Student(
+            uid=student_data.get("uid"),
+            student_id=student_data.get("student_id"),
+            first_name=student_data.get("first_name"),
+            last_name=student_data.get("last_name"),
+            email=student_data.get("email"),
+            phone_number=student_data.get("phone_number"),
+            guardian_number=student_data.get("guardian_number"),
+            birth_date=student_data.get("birth_date"),
+            national_id=student_data.get("national_id"),
+            gender=student_data.get("gender"),
+            level=student_data.get("level"),
+            school_name=student_data.get("school_name"),
+            is_subscription=student_data.get("is_subscription", True),
+            fingerprint_template=None  # No fingerprint for Main Backend created students
+        )
+        
+        # Check if student already exists locally
+        existing_student = await Student.find_one(Student.uid == uid)
+        if existing_student:
+            print(f"⚠️ Student with UID {uid} already exists in Fingerprint Backend database")
+            return {
+                "success": True,
+                "message": "Student already exists in Fingerprint Backend",
+                "uid": uid
+            }
+        
+        await local_student.insert()
+        print(f"✅ Student {student_data.get('first_name')} {student_data.get('last_name')} successfully stored in Fingerprint Backend")
+        
+        return {
+            "success": True,
+            "message": "Student successfully synced to Fingerprint Backend",
+            "uid": uid,
+            "student_id": student_data.get("student_id")
+        }
+        
+    except Exception as e:
+        print(f"❌ Error syncing student from Main Backend: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to sync student to Fingerprint Backend: {str(e)}"
+        )
 
 
 @router.post("/cleanup-synced-students")

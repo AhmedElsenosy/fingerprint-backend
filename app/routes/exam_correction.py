@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends, Request
+from fastapi.responses import FileResponse
 from datetime import datetime
 import httpx
 import os
@@ -6,12 +7,14 @@ import shutil
 from pathlib import Path
 from typing import Dict
 import time
+import tempfile
 from app.dependencies.auth import get_current_assistant
 
 from app.utils.exam_corrector import correct_student_exam
 from app.utils.model_detector import detect_exam_model
 from app.utils.student_id_detector import detect_student_id
 from app.utils.bubble_sheet_processor import process_bubble_sheet
+from app.utils.pdf_generator import generate_exam_results_pdf
 from scanner import ScannerConnection
 from bson import ObjectId
 
@@ -718,11 +721,13 @@ async def submit_exam_solutions_with_auto_feeder(
     """
     Submit and automatically correct multiple student exam solutions using scanner's auto-feeder.
     This endpoint connects to scanner, uses the automatic document feeder (ADF) to scan
-    multiple bubble sheets, and processes them for automatic correction in batch.
+    multiple bubble sheets, processes them for automatic correction in batch, and returns
+    a PDF file containing all exam papers for download.
     """
     scanner = None
     processed_results = []
     temp_files_to_cleanup = []
+    pdf_report_path = None
     
     try:
         # Step 1: Get exam details from main backend
@@ -841,7 +846,7 @@ async def submit_exam_solutions_with_auto_feeder(
                 # Continue with next sheet
                 continue
         
-        # Step 6: Prepare final response
+        # Step 6: Check if any sheets were processed
         total_processed = successful_corrections + failed_corrections
         
         if total_processed == 0:
@@ -851,20 +856,63 @@ async def submit_exam_solutions_with_auto_feeder(
             )
         
         completion_message = f"Auto-feeder processing completed. Processed {total_processed} sheets: {successful_corrections} successful, {failed_corrections} failed"
+        print(completion_message)
         
-        return {
-            "message": completion_message,
-            "total_sheets_processed": total_processed,
-            "successful_corrections": successful_corrections,
-            "failed_corrections": failed_corrections,
-            "scanner_info": scanner_info,
-            "scan_settings": {
-                "resolution": scan_resolution,
-                "mode": scan_mode,
-                "max_sheets": max_sheets
-            },
-            "results": processed_results
-        }
+        # Step 7: Generate PDF with all exam paper images
+        if successful_corrections > 0:
+            try:
+                pdf_report_path = await generate_exam_results_pdf(
+                    exam_id=exam_id,
+                    exam_data=exam_data,
+                    processed_results=processed_results,
+                    scanner_info=scanner_info,
+                    scan_settings={
+                        "resolution": scan_resolution,
+                        "mode": scan_mode,
+                        "max_sheets": max_sheets
+                    }
+                )
+                print(f"📄 Generated PDF with all exam papers: {pdf_report_path}")
+            except Exception as e:
+                print(f"⚠️ Failed to generate PDF with exam papers: {str(e)}")
+                pdf_report_path = None
+        
+        # Step 8: Return PDF file for download or JSON response if no PDF
+        if pdf_report_path and os.path.exists(pdf_report_path):
+            # Generate a nice filename for download
+            exam_name = exam_data.get('name', 'Exam').replace(' ', '_')
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            download_filename = f"{exam_name}_papers_{timestamp}.pdf"
+            
+            # Return the PDF file for download
+            print(f"📄 Returning PDF file for download: {download_filename}")
+            return FileResponse(
+                path=pdf_report_path,
+                filename=download_filename,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f"attachment; filename={download_filename}",
+                    "X-Total-Sheets": str(total_processed),
+                    "X-Successful-Corrections": str(successful_corrections),
+                    "X-Failed-Corrections": str(failed_corrections)
+                }
+            )
+        else:
+            # No PDF was generated, return JSON response
+            return {
+                "message": completion_message,
+                "total_sheets_processed": total_processed,
+                "successful_corrections": successful_corrections,
+                "failed_corrections": failed_corrections,
+                "scanner_info": scanner_info,
+                "scan_settings": {
+                    "resolution": scan_resolution,
+                    "mode": scan_mode,
+                    "max_sheets": max_sheets
+                },
+                "results": processed_results,
+                "error": "No PDF generated - no successful corrections"
+            }
         
     except HTTPException:
         # Re-raise HTTP exceptions as-is
@@ -883,20 +931,7 @@ async def submit_exam_solutions_with_auto_feeder(
             except:
                 pass
         
-        # Note: We keep successful scanned files for record-keeping
-        # Clean up only failed temp files
-        for temp_file in temp_files_to_cleanup:
-            if temp_file and os.path.exists(temp_file):
-                # Check if this file was successfully processed
-                file_kept = any(
-                    result.get("status") == "success" and result.get("solution_path") == temp_file 
-                    for result in processed_results
-                )
-                if not file_kept:
-                    try:
-                        os.remove(temp_file)
-                    except:
-                        pass
+        # Note: User will handle cleanup of temporary files and PDF
 
 
 async def process_single_sheet(exam_id: str, exam_data: dict, sheet_path: str, sheet_number: int, request: Request, manual_student_id: str = None):
@@ -1011,12 +1046,8 @@ async def process_single_sheet(exam_id: str, exam_data: dict, sheet_path: str, s
             else:
                 raise ValueError(f"Invalid student ID format: '{detected_student_id}' must be a numeric value")
         
-        # Step 3: Rename file with detected student ID
-        timestamp = int(time.time())
-        final_filename = f"autofeeder_{detected_student_id}_{exam_id}_sheet{sheet_number}_{timestamp}.png"
-        final_solution_path = os.path.join(STUDENT_SOLUTION_DIR, final_filename)
-        
-        os.rename(sheet_path, final_solution_path)
+        # Step 3: Use temporary file directly (no permanent storage)
+        final_solution_path = sheet_path  # Use temp path for processing only
         
         # Step 4: Detect exam model and perform correction (same logic as scanner endpoint)
         print(f"🔍 Sheet #{sheet_number}: Detecting exam model...")
@@ -1136,7 +1167,7 @@ async def process_single_sheet(exam_id: str, exam_data: dict, sheet_path: str, s
         if not correction_result["success"]:
             raise ValueError(f"Correction failed: {correction_result['message']}")
         
-        # Step 8: Save results to backend
+        # Step 8: Save results to backend (without permanent solution file)
         student_degree = correction_result["student_score"]
         degree_percentage = correction_result["percentage"]
         
@@ -1145,7 +1176,7 @@ async def process_single_sheet(exam_id: str, exam_data: dict, sheet_path: str, s
             "degree": student_degree,
             "percentage": degree_percentage,
             "delivery_time": datetime.utcnow().isoformat(),
-            "solution_photo": final_solution_path,
+            "solution_photo": None,  # Don't save solution file permanently
             "correction_details": correction_result
         }
         
@@ -1160,7 +1191,7 @@ async def process_single_sheet(exam_id: str, exam_data: dict, sheet_path: str, s
             if result_response.status_code != 200:
                 raise ValueError(f"Failed to save results: {result_response.text}")
         
-        # Step 9: Return success result
+        # Step 9: Return success result (temp path for PDF generation only)
         return {
             "sheet_number": sheet_number,
             "student_id": detected_student_id,
@@ -1169,18 +1200,20 @@ async def process_single_sheet(exam_id: str, exam_data: dict, sheet_path: str, s
             "final_degree": exam_data["final_degree"],
             "percentage": degree_percentage,
             "status": "success",
-            "solution_path": final_solution_path,
+            "solution_path": final_solution_path,  # Keep temp path for PDF generation
             "detected_model": detected_model,
-            "model_name": selected_model.get("model_name") if selected_model else "Legacy Model"
+            "model_name": selected_model.get("model_name") if selected_model else "Legacy Model",
+            "temp_file": True  # Mark as temporary file
         }
         
     except Exception as e:
-        # Return error result
+        # Return error result (temp path for PDF generation if needed)
         return {
             "sheet_number": sheet_number,
             "status": "failed",
             "error": str(e),
-            "solution_path": sheet_path if os.path.exists(sheet_path) else None
+            "solution_path": sheet_path if os.path.exists(sheet_path) else None,
+            "temp_file": True  # Mark as temporary file
         }
 
 

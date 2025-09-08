@@ -130,6 +130,37 @@ async def sync_local_counter_with_remote(remote_uid: int):
         return False
 
 
+async def sync_local_counter_with_uid(uid: int):
+    """
+    Sync local counter to match a specific UID from Main Backend.
+    This ensures both backends have synchronized counters.
+    
+    Args:
+        uid: The UID from Main Backend to sync to
+    """
+    try:
+        counter = await Counter.find_one(Counter.name == "student_sequence")
+        
+        if not counter:
+            # Create counter with the UID value
+            counter = Counter(name="student_sequence", value=uid)
+            await counter.insert()
+        else:
+            # Only update if the UID is higher than current counter
+            if uid > counter.value:
+                counter.value = uid
+                await counter.save()
+                print(f"✅ Local counter synced to UID {uid}")
+            else:
+                print(f"ℹ️ Local counter ({counter.value}) is already >= UID {uid}, no sync needed")
+            
+        return True
+        
+    except Exception as e:
+        print(f"❌ Failed to sync local counter with UID {uid}: {e}")
+        return False
+
+
 async def initialize_student_counter(start_value: int = 10018):
     """
     Initialize the student counter to a specific value.
